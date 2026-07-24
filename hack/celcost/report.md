@@ -16,6 +16,7 @@ Estimated static CEL costs versus kube-apiserver limits, computed from `k8s.io/a
 | ControllerConfiguration | v1alpha1 | 3,195 | 0.00% |
 | GitCommitStatus | v1alpha1 | 0 | 0.00% |
 | GitRepository | v1alpha1 | 128 | 0.00% |
+| JobCommitStatus | v1alpha1 | 0 | 0.00% |
 | PromotionStrategy | v1alpha1 | 72,438,744 | 72.44% |
 | PullRequest | v1alpha1 | 270 | 0.00% |
 | RevertCommit | v1alpha1 | 0 | 0.00% |
@@ -153,6 +154,14 @@ Source: `promoter.argoproj.io_gitrepositories.yaml`
 |---|---:|---:|---|
 | `.spec` | 128 | 0.00% | `[has(self.github),has(self.gitlab),has(self.forgejo),has(self.gitea),has(self.bitbucketCloud),has(self.azureDevOps),h...` |
 | **Total** | **128** | **0.00%** | |
+
+#### JobCommitStatus
+
+Source: `promoter.argoproj.io_jobcommitstatuses.yaml`
+
+##### Version `v1alpha1`
+
+_No CEL validation rules._
 
 #### PromotionStrategy
 

@@ -147,6 +147,20 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &apiv1alpha1.HTTPRequestSpecApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("HydratorMetadata"):
 		return &apiv1alpha1.HydratorMetadataApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("JobCommitStatus"):
+		return &apiv1alpha1.JobCommitStatusApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("JobCommitStatusEnvironmentStatus"):
+		return &apiv1alpha1.JobCommitStatusEnvironmentStatusApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("JobCommitStatusJobReference"):
+		return &apiv1alpha1.JobCommitStatusJobReferenceApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("JobCommitStatusSpec"):
+		return &apiv1alpha1.JobCommitStatusSpecApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("JobCommitStatusStatus"):
+		return &apiv1alpha1.JobCommitStatusStatusApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("JobCommitStatusSuccessSpec"):
+		return &apiv1alpha1.JobCommitStatusSuccessSpecApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("JobCommitStatusWhenSpec"):
+		return &apiv1alpha1.JobCommitStatusWhenSpecApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("ModeSpec"):
 		return &apiv1alpha1.ModeSpecApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("OAuth2Auth"):

@@ -351,6 +351,46 @@ func (in HydratorMetadata) OpenAPIModelName() string {
 }
 
 // OpenAPIModelName returns the OpenAPI model name for this type.
+func (in JobCommitStatus) OpenAPIModelName() string {
+	return "io.argoproj.promoter.v1alpha1.JobCommitStatus"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in JobCommitStatusEnvironmentStatus) OpenAPIModelName() string {
+	return "io.argoproj.promoter.v1alpha1.JobCommitStatusEnvironmentStatus"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in JobCommitStatusJobReference) OpenAPIModelName() string {
+	return "io.argoproj.promoter.v1alpha1.JobCommitStatusJobReference"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in JobCommitStatusList) OpenAPIModelName() string {
+	return "io.argoproj.promoter.v1alpha1.JobCommitStatusList"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in JobCommitStatusSpec) OpenAPIModelName() string {
+	return "io.argoproj.promoter.v1alpha1.JobCommitStatusSpec"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in JobCommitStatusStatus) OpenAPIModelName() string {
+	return "io.argoproj.promoter.v1alpha1.JobCommitStatusStatus"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in JobCommitStatusSuccessSpec) OpenAPIModelName() string {
+	return "io.argoproj.promoter.v1alpha1.JobCommitStatusSuccessSpec"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in JobCommitStatusWhenSpec) OpenAPIModelName() string {
+	return "io.argoproj.promoter.v1alpha1.JobCommitStatusWhenSpec"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
 func (in ModeSpec) OpenAPIModelName() string {
 	return "io.argoproj.promoter.v1alpha1.ModeSpec"
 }

@@ -101,6 +101,14 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		apiv1alpha1.HealthyDryShas{}.OpenAPIModelName():                                       schema_argoproj_labs_gitops_promoter_api_v1alpha1_HealthyDryShas(ref),
 		apiv1alpha1.History{}.OpenAPIModelName():                                              schema_argoproj_labs_gitops_promoter_api_v1alpha1_History(ref),
 		apiv1alpha1.HydratorMetadata{}.OpenAPIModelName():                                     schema_argoproj_labs_gitops_promoter_api_v1alpha1_HydratorMetadata(ref),
+		apiv1alpha1.JobCommitStatus{}.OpenAPIModelName():                                      schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatus(ref),
+		apiv1alpha1.JobCommitStatusEnvironmentStatus{}.OpenAPIModelName():                     schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusEnvironmentStatus(ref),
+		apiv1alpha1.JobCommitStatusJobReference{}.OpenAPIModelName():                          schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusJobReference(ref),
+		apiv1alpha1.JobCommitStatusList{}.OpenAPIModelName():                                  schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusList(ref),
+		apiv1alpha1.JobCommitStatusSpec{}.OpenAPIModelName():                                  schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusSpec(ref),
+		apiv1alpha1.JobCommitStatusStatus{}.OpenAPIModelName():                                schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusStatus(ref),
+		apiv1alpha1.JobCommitStatusSuccessSpec{}.OpenAPIModelName():                           schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusSuccessSpec(ref),
+		apiv1alpha1.JobCommitStatusWhenSpec{}.OpenAPIModelName():                              schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusWhenSpec(ref),
 		apiv1alpha1.ModeSpec{}.OpenAPIModelName():                                             schema_argoproj_labs_gitops_promoter_api_v1alpha1_ModeSpec(ref),
 		apiv1alpha1.OAuth2Auth{}.OpenAPIModelName():                                           schema_argoproj_labs_gitops_promoter_api_v1alpha1_OAuth2Auth(ref),
 		apiv1alpha1.ObjectReference{}.OpenAPIModelName():                                      schema_argoproj_labs_gitops_promoter_api_v1alpha1_ObjectReference(ref),
@@ -3443,6 +3451,367 @@ func schema_argoproj_labs_gitops_promoter_api_v1alpha1_HydratorMetadata(ref comm
 		},
 		Dependencies: []string{
 			apiv1alpha1.RevisionReference{}.OpenAPIModelName(), metav1.Time{}.OpenAPIModelName()},
+	}
+}
+
+func schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "JobCommitStatus is the Schema for the jobcommitstatuses API.\n\nIt gates promotions on in-cluster batch work: for each applicable environment (resolved from the referenced PromotionStrategy), the controller creates a Job from jobTemplate for the relevant hydrated SHA (per reportOn), observes it, and reflects the result into a CommitStatus.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Description: "metadata is a standard object metadata",
+							Default:     map[string]interface{}{},
+							Ref:         ref(metav1.ObjectMeta{}.OpenAPIModelName()),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Description: "spec defines the desired state of JobCommitStatus",
+							Default:     map[string]interface{}{},
+							Ref:         ref(apiv1alpha1.JobCommitStatusSpec{}.OpenAPIModelName()),
+						},
+					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Description: "status defines the observed state of JobCommitStatus",
+							Default:     map[string]interface{}{},
+							Ref:         ref(apiv1alpha1.JobCommitStatusStatus{}.OpenAPIModelName()),
+						},
+					},
+				},
+				Required: []string{"spec"},
+			},
+		},
+		Dependencies: []string{
+			apiv1alpha1.JobCommitStatusSpec{}.OpenAPIModelName(), apiv1alpha1.JobCommitStatusStatus{}.OpenAPIModelName(), metav1.ObjectMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusEnvironmentStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "JobCommitStatusEnvironmentStatus defines the observed Job/gate status for a specific environment.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"branch": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Branch is the environment branch name being gated.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"sha": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Sha is the hydrated commit SHA (proposed or active, per spec.reportOn) that the current or most recent Job was created for. Supports both SHA-1 (40 chars) and SHA-256 (64 chars) Git hash formats.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"jobRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "JobRef references the child Job created for Sha. The Job always lives in the JobCommitStatus's own namespace.",
+							Ref:         ref(apiv1alpha1.JobCommitStatusJobReference{}.OpenAPIModelName()),
+						},
+					},
+					"phase": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Phase represents the current phase of the gate for this environment.\n  - \"pending\": the Job has been created but has not finished, or no Job has been created yet for Sha\n  - \"success\": the Job finished and success.when.expression evaluated to true\n  - \"failure\": the Job finished and success.when.expression evaluated to false, or the Job itself\n    failed (for example activeDeadlineSeconds was exceeded or backoffLimit was reached)",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"startedAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "StartedAt is when the current/most recent Job was created.",
+							Ref:         ref(metav1.Time{}.OpenAPIModelName()),
+						},
+					},
+					"finishedAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "FinishedAt is when the current/most recent Job reached a terminal state (Complete or Failed).",
+							Ref:         ref(metav1.Time{}.OpenAPIModelName()),
+						},
+					},
+				},
+				Required: []string{"branch", "phase"},
+			},
+		},
+		Dependencies: []string{
+			apiv1alpha1.JobCommitStatusJobReference{}.OpenAPIModelName(), metav1.Time{}.OpenAPIModelName()},
+	}
+}
+
+func schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusJobReference(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "JobCommitStatusJobReference references the child Job created for a given environment/SHA.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name is the name of the child Job.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"namespace": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Namespace is the namespace of the child Job. This always matches the JobCommitStatus's own namespace.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"name", "namespace"},
+			},
+		},
+	}
+}
+
+func schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "JobCommitStatusList contains a list of JobCommitStatus.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(metav1.ListMeta{}.OpenAPIModelName()),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Ref: ref(apiv1alpha1.JobCommitStatus{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			apiv1alpha1.JobCommitStatus{}.OpenAPIModelName(), metav1.ListMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "JobCommitStatusSpec defines the desired state of JobCommitStatus.\n\nApplicable environments are NOT enumerated on this resource. Instead, the controller resolves them from the referenced PromotionStrategy the same way GitCommitStatus and WebRequestCommitStatus do: an environment is applicable when Key matches an entry in PromotionStrategy.Spec.ProposedCommitStatuses or Environment.ProposedCommitStatuses (reportOn=proposed), or PromotionStrategy.Spec.ActiveCommitStatuses or Environment.ActiveCommitStatuses (reportOn=active). The PromotionStrategy remains the single authoritative source for \"which environments does this gate apply to\".",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"promotionStrategyRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PromotionStrategyRef is a reference to the promotion strategy that this commit status applies to.",
+							Default:     map[string]interface{}{},
+							Ref:         ref(apiv1alpha1.ObjectReference{}.OpenAPIModelName()),
+						},
+					},
+					"key": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Key is the gate name referenced in the PromotionStrategy's proposedCommitStatuses or activeCommitStatuses. It is used as the commit status key and in status messages. Must be lowercase alphanumeric with hyphens, 1–63 characters (pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$).",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"reportOn": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReportOn specifies which commit SHA the Job is run against and the CommitStatus is reported on.\n  - \"proposed\" (default): the controller (re)creates the Job whenever the proposed hydrated SHA\n    changes for an applicable environment. Use this for pre-promotion gates (tests, evals, migrations\n    dry-runs) that must pass before the change is promoted.\n  - \"active\": the controller (re)creates the Job whenever the active hydrated SHA changes. Use this\n    for post-promotion checks that re-validate the environment after a promotion has landed.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"descriptionTemplate": {
+						SchemaProps: spec.SchemaProps{
+							Description: "DescriptionTemplate is the human-readable commit status description shown in the SCM provider (GitHub, GitLab, etc.). Uses Go templates.\n\nTemplate variables (mirrors WebRequestCommitStatus's promotionstrategy-context variable set):\n  - {{ .Branch }}: the environment branch the Job was created for\n  - {{ .PromotionStrategy }}: the full PromotionStrategy spec and status\n  - {{ .JobCommitStatus }}: the full JobCommitStatus spec and status (snapshot from the previous reconcile)\n  - {{ .NamespaceMetadata.Labels }} / {{ .NamespaceMetadata.Annotations }}: labels/annotations of the namespace\n  - {{ .Job }}: the full child Job object once it has finished (nil while the Job is still running),\n    so the description can surface details such as {{ .Job.status.conditions }} or a container's\n    termination message.\n\nIf not specified, defaults to empty string.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"success": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Success defines how to decide success/failure from the finished child Job.",
+							Default:     map[string]interface{}{},
+							Ref:         ref(apiv1alpha1.JobCommitStatusSuccessSpec{}.OpenAPIModelName()),
+						},
+					},
+					"jobTemplate": {
+						SchemaProps: spec.SchemaProps{
+							Description: "JobTemplate is a standard batch/v1 Job template, embedded verbatim. The controller does not inject defaults into the Job spec itself — native Job mechanics carry their own weight:\n  backoffLimit            -> retry semantics\n  activeDeadlineSeconds   -> timeout\n  ttlSecondsAfterFinished -> cleanup (a reasonable suggestion is 24h; not defaulted by the controller)\n\nTemplating (Go templates, same variables as DescriptionTemplate) is supported ONLY in jobTemplate.metadata.labels and jobTemplate.metadata.annotations; the rest of the Job spec is used as-is. The controller also stamps promoter.argoproj.io/branch, promoter.argoproj.io/dry-sha, and promoter.argoproj.io/hydrated-sha labels onto the created Job (and, transitively, its Pods), so they're available to the running container via the downward API.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("k8s.io/api/batch/v1.JobTemplateSpec"),
+						},
+					},
+				},
+				Required: []string{"promotionStrategyRef", "key", "success", "jobTemplate"},
+			},
+		},
+		Dependencies: []string{
+			apiv1alpha1.JobCommitStatusSuccessSpec{}.OpenAPIModelName(), apiv1alpha1.ObjectReference{}.OpenAPIModelName(), "k8s.io/api/batch/v1.JobTemplateSpec"},
+	}
+}
+
+func schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "JobCommitStatusStatus defines the observed state of JobCommitStatus.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"observedGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedGeneration is the .metadata.generation that this status was reconciled from. Because status is written via Server-Side Apply with ForceOwnership (which has no optimistic-concurrency check), this field is the canonical way to detect stale status writes: compare status.observedGeneration with metadata.generation.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"environments": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"branch",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Environments holds the observed Job/gate status for each applicable environment (as resolved from the referenced PromotionStrategy; see JobCommitStatusSpec).",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Ref: ref(apiv1alpha1.JobCommitStatusEnvironmentStatus{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
+					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions represent the latest available observations of the JobCommitStatus's state. Standard condition types include \"Ready\" which aggregates the status of all environments.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Ref: ref(metav1.Condition{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
+					"instanceID": {
+						SchemaProps: spec.SchemaProps{
+							Description: "InstanceID mirrors metadata.labels[promoter.argoproj.io/instance-id] stamped on each reconcile attempt by this install's controller, including when Ready=False; omitted when the resource has no instance-id label (default install).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			apiv1alpha1.JobCommitStatusEnvironmentStatus{}.OpenAPIModelName(), metav1.Condition{}.OpenAPIModelName()},
+	}
+}
+
+func schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusSuccessSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "JobCommitStatusSuccessSpec defines when the commit status phase is success, based on the finished child Job.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"when": {
+						SchemaProps: spec.SchemaProps{
+							Description: "When configures the expression evaluated against the finished Job to determine success.",
+							Default:     map[string]interface{}{},
+							Ref:         ref(apiv1alpha1.JobCommitStatusWhenSpec{}.OpenAPIModelName()),
+						},
+					},
+				},
+				Required: []string{"when"},
+			},
+		},
+		Dependencies: []string{
+			apiv1alpha1.JobCommitStatusWhenSpec{}.OpenAPIModelName()},
+	}
+}
+
+func schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusWhenSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "JobCommitStatusWhenSpec holds the expression used to evaluate a finished Job.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"expression": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Expression is an expr expression (github.com/expr-lang/expr) evaluated against the finished Job. It must return a boolean: true means success, false means failure.\n\nAvailable variables:\n  - Job (batchv1.Job): the finished child Job object\n\nA reasonable documented default for most use cases is a zero exit code on the main container, expressed as:\n\n  \"Job.status.succeeded >= 1\"\n\nUsers running multi-completion Jobs, or who need to distinguish a nonzero exit code (Failed) from an infrastructure problem such as ImagePullBackOff (Error, the way Argo Workflows does), can inspect Job.status (and, in the future, pod/container statuses) in the expression.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"expression"},
+			},
+		},
 	}
 }
 
