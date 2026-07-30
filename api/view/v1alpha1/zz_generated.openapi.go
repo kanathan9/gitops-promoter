@@ -102,6 +102,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		apiv1alpha1.History{}.OpenAPIModelName():                                              schema_argoproj_labs_gitops_promoter_api_v1alpha1_History(ref),
 		apiv1alpha1.HydratorMetadata{}.OpenAPIModelName():                                     schema_argoproj_labs_gitops_promoter_api_v1alpha1_HydratorMetadata(ref),
 		apiv1alpha1.JobCommitStatus{}.OpenAPIModelName():                                      schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatus(ref),
+		apiv1alpha1.JobCommitStatusConfiguration{}.OpenAPIModelName():                         schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusConfiguration(ref),
 		apiv1alpha1.JobCommitStatusEnvironmentStatus{}.OpenAPIModelName():                     schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusEnvironmentStatus(ref),
 		apiv1alpha1.JobCommitStatusJobReference{}.OpenAPIModelName():                          schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusJobReference(ref),
 		apiv1alpha1.JobCommitStatusList{}.OpenAPIModelName():                                  schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusList(ref),
@@ -2099,12 +2100,19 @@ func schema_argoproj_labs_gitops_promoter_api_v1alpha1_ControllerConfigurationSp
 							Ref:         ref(apiv1alpha1.ScheduledCommitStatusConfiguration{}.OpenAPIModelName()),
 						},
 					},
+					"jobCommitStatus": {
+						SchemaProps: spec.SchemaProps{
+							Description: "JobCommitStatus contains the configuration for the JobCommitStatus controller, including WorkQueue settings that control reconciliation behavior.",
+							Default:     map[string]interface{}{},
+							Ref:         ref(apiv1alpha1.JobCommitStatusConfiguration{}.OpenAPIModelName()),
+						},
+					},
 				},
-				Required: []string{"promotionStrategy", "changeTransferPolicy", "pullRequest", "commitStatus", "argocdCommitStatus", "timedCommitStatus", "gitCommitStatus", "webRequestCommitStatus", "scheduledCommitStatus"},
+				Required: []string{"promotionStrategy", "changeTransferPolicy", "pullRequest", "commitStatus", "argocdCommitStatus", "timedCommitStatus", "gitCommitStatus", "webRequestCommitStatus", "scheduledCommitStatus", "jobCommitStatus"},
 			},
 		},
 		Dependencies: []string{
-			apiv1alpha1.ArgoCDCommitStatusConfiguration{}.OpenAPIModelName(), apiv1alpha1.ChangeTransferPolicyConfiguration{}.OpenAPIModelName(), apiv1alpha1.CommitStatusConfiguration{}.OpenAPIModelName(), apiv1alpha1.GitCommitStatusConfiguration{}.OpenAPIModelName(), apiv1alpha1.PromotionStrategyConfiguration{}.OpenAPIModelName(), apiv1alpha1.PullRequestConfiguration{}.OpenAPIModelName(), apiv1alpha1.ScheduledCommitStatusConfiguration{}.OpenAPIModelName(), apiv1alpha1.TimedCommitStatusConfiguration{}.OpenAPIModelName(), apiv1alpha1.WebRequestCommitStatusConfiguration{}.OpenAPIModelName()},
+			apiv1alpha1.ArgoCDCommitStatusConfiguration{}.OpenAPIModelName(), apiv1alpha1.ChangeTransferPolicyConfiguration{}.OpenAPIModelName(), apiv1alpha1.CommitStatusConfiguration{}.OpenAPIModelName(), apiv1alpha1.GitCommitStatusConfiguration{}.OpenAPIModelName(), apiv1alpha1.JobCommitStatusConfiguration{}.OpenAPIModelName(), apiv1alpha1.PromotionStrategyConfiguration{}.OpenAPIModelName(), apiv1alpha1.PullRequestConfiguration{}.OpenAPIModelName(), apiv1alpha1.ScheduledCommitStatusConfiguration{}.OpenAPIModelName(), apiv1alpha1.TimedCommitStatusConfiguration{}.OpenAPIModelName(), apiv1alpha1.WebRequestCommitStatusConfiguration{}.OpenAPIModelName()},
 	}
 }
 
@@ -3502,6 +3510,29 @@ func schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatus(ref commo
 		},
 		Dependencies: []string{
 			apiv1alpha1.JobCommitStatusSpec{}.OpenAPIModelName(), apiv1alpha1.JobCommitStatusStatus{}.OpenAPIModelName(), metav1.ObjectMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusConfiguration(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "JobCommitStatusConfiguration defines the configuration for the JobCommitStatus controller.\n\nThis configuration controls how the JobCommitStatus controller processes reconciliation requests, including requeue intervals, concurrency limits, and rate limiting behavior.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"workQueue": {
+						SchemaProps: spec.SchemaProps{
+							Description: "WorkQueue contains the work queue configuration for the JobCommitStatus controller. This includes requeue duration, maximum concurrent reconciles, and rate limiter settings.",
+							Default:     map[string]interface{}{},
+							Ref:         ref(apiv1alpha1.WorkQueue{}.OpenAPIModelName()),
+						},
+					},
+				},
+				Required: []string{"workQueue"},
+			},
+		},
+		Dependencies: []string{
+			apiv1alpha1.WorkQueue{}.OpenAPIModelName()},
 	}
 }
 

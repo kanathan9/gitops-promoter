@@ -356,6 +356,11 @@ func (in JobCommitStatus) OpenAPIModelName() string {
 }
 
 // OpenAPIModelName returns the OpenAPI model name for this type.
+func (in JobCommitStatusConfiguration) OpenAPIModelName() string {
+	return "io.argoproj.promoter.v1alpha1.JobCommitStatusConfiguration"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
 func (in JobCommitStatusEnvironmentStatus) OpenAPIModelName() string {
 	return "io.argoproj.promoter.v1alpha1.JobCommitStatusEnvironmentStatus"
 }

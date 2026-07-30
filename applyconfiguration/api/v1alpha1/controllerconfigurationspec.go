@@ -63,6 +63,9 @@ type ControllerConfigurationSpecApplyConfiguration struct {
 	// ScheduledCommitStatus contains the configuration for the ScheduledCommitStatus controller,
 	// including WorkQueue settings that control reconciliation behavior.
 	ScheduledCommitStatus *ScheduledCommitStatusConfigurationApplyConfiguration `json:"scheduledCommitStatus,omitempty"`
+	// JobCommitStatus contains the configuration for the JobCommitStatus controller,
+	// including WorkQueue settings that control reconciliation behavior.
+	JobCommitStatus *JobCommitStatusConfigurationApplyConfiguration `json:"jobCommitStatus,omitempty"`
 }
 
 // ControllerConfigurationSpecApplyConfiguration constructs a declarative configuration of the ControllerConfigurationSpec type for use with
@@ -148,5 +151,13 @@ func (b *ControllerConfigurationSpecApplyConfiguration) WithWebRequestCommitStat
 // If called multiple times, the ScheduledCommitStatus field is set to the value of the last call.
 func (b *ControllerConfigurationSpecApplyConfiguration) WithScheduledCommitStatus(value *ScheduledCommitStatusConfigurationApplyConfiguration) *ControllerConfigurationSpecApplyConfiguration {
 	b.ScheduledCommitStatus = value
+	return b
+}
+
+// WithJobCommitStatus sets the JobCommitStatus field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the JobCommitStatus field is set to the value of the last call.
+func (b *ControllerConfigurationSpecApplyConfiguration) WithJobCommitStatus(value *JobCommitStatusConfigurationApplyConfiguration) *ControllerConfigurationSpecApplyConfiguration {
+	b.JobCommitStatus = value
 	return b
 }

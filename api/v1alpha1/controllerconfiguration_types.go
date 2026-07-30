@@ -87,6 +87,11 @@ type ControllerConfigurationSpec struct {
 	// including WorkQueue settings that control reconciliation behavior.
 	// +required
 	ScheduledCommitStatus ScheduledCommitStatusConfiguration `json:"scheduledCommitStatus"`
+
+	// JobCommitStatus contains the configuration for the JobCommitStatus controller,
+	// including WorkQueue settings that control reconciliation behavior.
+	// +required
+	JobCommitStatus JobCommitStatusConfiguration `json:"jobCommitStatus"`
 }
 
 // PromotionStrategyConfiguration defines the configuration for the PromotionStrategy controller.
@@ -196,6 +201,17 @@ type WebRequestCommitStatusConfiguration struct {
 // requests, including requeue intervals, concurrency limits, and rate limiting behavior.
 type ScheduledCommitStatusConfiguration struct {
 	// WorkQueue contains the work queue configuration for the ScheduledCommitStatus controller.
+	// This includes requeue duration, maximum concurrent reconciles, and rate limiter settings.
+	// +required
+	WorkQueue WorkQueue `json:"workQueue"`
+}
+
+// JobCommitStatusConfiguration defines the configuration for the JobCommitStatus controller.
+//
+// This configuration controls how the JobCommitStatus controller processes reconciliation
+// requests, including requeue intervals, concurrency limits, and rate limiting behavior.
+type JobCommitStatusConfiguration struct {
+	// WorkQueue contains the work queue configuration for the JobCommitStatus controller.
 	// This includes requeue duration, maximum concurrent reconciles, and rate limiter settings.
 	// +required
 	WorkQueue WorkQueue `json:"workQueue"`

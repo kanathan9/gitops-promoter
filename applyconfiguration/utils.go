@@ -149,6 +149,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &apiv1alpha1.HydratorMetadataApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("JobCommitStatus"):
 		return &apiv1alpha1.JobCommitStatusApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("JobCommitStatusConfiguration"):
+		return &apiv1alpha1.JobCommitStatusConfigurationApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("JobCommitStatusEnvironmentStatus"):
 		return &apiv1alpha1.JobCommitStatusEnvironmentStatusApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("JobCommitStatusJobReference"):

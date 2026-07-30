@@ -40,6 +40,7 @@ func (m *Manager) GetInstanceID(ctx context.Context) (*string, error) {
 //   - GitCommitStatusConfiguration
 //   - WebRequestCommitStatusConfiguration
 //   - ScheduledCommitStatusConfiguration
+//   - JobCommitStatusConfiguration
 type ControllerConfigurationTypes interface {
 	promoterv1alpha1.PromotionStrategyConfiguration |
 		promoterv1alpha1.ChangeTransferPolicyConfiguration |
@@ -49,7 +50,8 @@ type ControllerConfigurationTypes interface {
 		promoterv1alpha1.TimedCommitStatusConfiguration |
 		promoterv1alpha1.GitCommitStatusConfiguration |
 		promoterv1alpha1.WebRequestCommitStatusConfiguration |
-		promoterv1alpha1.ScheduledCommitStatusConfiguration
+		promoterv1alpha1.ScheduledCommitStatusConfiguration |
+		promoterv1alpha1.JobCommitStatusConfiguration
 }
 
 // ControllerResultTypes is a constraint that defines the set of result types returned by controller
@@ -298,6 +300,8 @@ func getWorkQueueForController[T ControllerConfigurationTypes](ctx context.Conte
 		return config.Spec.WebRequestCommitStatus.WorkQueue, nil
 	case promoterv1alpha1.ScheduledCommitStatusConfiguration:
 		return config.Spec.ScheduledCommitStatus.WorkQueue, nil
+	case promoterv1alpha1.JobCommitStatusConfiguration:
+		return config.Spec.JobCommitStatus.WorkQueue, nil
 	default:
 		return promoterv1alpha1.WorkQueue{}, fmt.Errorf("unsupported configuration type: %T", cfg)
 	}

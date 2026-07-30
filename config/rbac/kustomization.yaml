@@ -49,3 +49,6 @@ resources:
 - scheduledcommitstatus_admin_role.yaml
 - scheduledcommitstatus_editor_role.yaml
 - scheduledcommitstatus_viewer_role.yaml
+- jobcommitstatus_admin_role.yaml
+- jobcommitstatus_editor_role.yaml
+- jobcommitstatus_viewer_role.yaml

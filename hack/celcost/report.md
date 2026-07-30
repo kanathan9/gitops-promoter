@@ -13,7 +13,7 @@ Estimated static CEL costs versus kube-apiserver limits, computed from `k8s.io/a
 | ChangeTransferPolicy | v1alpha1 | 56,623,293 | 56.62% |
 | ClusterScmProvider | v1alpha1 | 135 | 0.00% |
 | CommitStatus | v1alpha1 | 3 | 0.00% |
-| ControllerConfiguration | v1alpha1 | 3,195 | 0.00% |
+| ControllerConfiguration | v1alpha1 | 3,550 | 0.00% |
 | GitCommitStatus | v1alpha1 | 0 | 0.00% |
 | GitRepository | v1alpha1 | 128 | 0.00% |
 | JobCommitStatus | v1alpha1 | 0 | 0.00% |
@@ -111,6 +111,7 @@ Source: `promoter.argoproj.io_controllerconfigurations.yaml`
 | `.spec.changeTransferPolicy.workQueue.rateLimiter.maxOf[]` | 204 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
 | `.spec.commitStatus.workQueue.rateLimiter.maxOf[]` | 204 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
 | `.spec.gitCommitStatus.workQueue.rateLimiter.maxOf[]` | 204 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
+| `.spec.jobCommitStatus.workQueue.rateLimiter.maxOf[]` | 204 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
 | `.spec.promotionStrategy.workQueue.rateLimiter.maxOf[]` | 204 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
 | `.spec.pullRequest.workQueue.rateLimiter.maxOf[]` | 204 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
 | `.spec.scheduledCommitStatus.workQueue.rateLimiter.maxOf[]` | 204 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
@@ -120,6 +121,7 @@ Source: `promoter.argoproj.io_controllerconfigurations.yaml`
 | `.spec.changeTransferPolicy.workQueue.rateLimiter` | 83 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size() <= 1` |
 | `.spec.commitStatus.workQueue.rateLimiter` | 83 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size() <= 1` |
 | `.spec.gitCommitStatus.workQueue.rateLimiter` | 83 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size() <= 1` |
+| `.spec.jobCommitStatus.workQueue.rateLimiter` | 83 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size() <= 1` |
 | `.spec.promotionStrategy.workQueue.rateLimiter` | 83 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size() <= 1` |
 | `.spec.pullRequest.workQueue.rateLimiter` | 83 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size() <= 1` |
 | `.spec.scheduledCommitStatus.workQueue.rateLimiter` | 83 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size() <= 1` |
@@ -129,12 +131,13 @@ Source: `promoter.argoproj.io_controllerconfigurations.yaml`
 | `.spec.changeTransferPolicy.workQueue.rateLimiter` | 68 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
 | `.spec.commitStatus.workQueue.rateLimiter` | 68 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
 | `.spec.gitCommitStatus.workQueue.rateLimiter` | 68 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
+| `.spec.jobCommitStatus.workQueue.rateLimiter` | 68 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
 | `.spec.promotionStrategy.workQueue.rateLimiter` | 68 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
 | `.spec.pullRequest.workQueue.rateLimiter` | 68 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
 | `.spec.scheduledCommitStatus.workQueue.rateLimiter` | 68 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
 | `.spec.timedCommitStatus.workQueue.rateLimiter` | 68 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
 | `.spec.webRequestCommitStatus.workQueue.rateLimiter` | 68 | 0.00% | `[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size() <= 1` |
-| **Total** | **3,195** | **0.00%** | |
+| **Total** | **3,550** | **0.00%** | |
 
 #### GitCommitStatus
 
