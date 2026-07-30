@@ -73,7 +73,16 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 	# view aggregation API (api/view/...) is served by an extension
 	# apiserver, not as CRDs; including it would make controller-gen's CRD generator
 	# treat those TypeMeta/ObjectMeta types as Kinds and fail.
-	$(CONTROLLER_GEN) crd paths="./api/v1alpha1/..." paths="./internal/types/argocd/..." output:crd:artifacts:config=config/crd/bases
+	#
+	# generateEmbeddedObjectMeta=true: without it, any field whose Go type embeds
+	# metav1.ObjectMeta (for example JobCommitStatus.spec.jobTemplate, a verbatim
+	# batch/v1 JobTemplateSpec, and its nested pod template metadata) gets an opaque
+	# "type: object" schema with no declared properties. The API server's structural-schema
+	# pruning then silently drops everything written under that metadata (labels,
+	# annotations, name, ...) since none of its fields are declared. This flag expands
+	# ObjectMeta to its well-known fields (name, namespace, labels, annotations,
+	# finalizers) so they survive Create/Update.
+	$(CONTROLLER_GEN) crd:generateEmbeddedObjectMeta=true paths="./api/v1alpha1/..." paths="./internal/types/argocd/..." output:crd:artifacts:config=config/crd/bases
 	# Move the Application CRD to the test dir. We don't need it in the promoter config, but we need it for e2e tests.
 	mv config/crd/bases/argoproj.io_applications.yaml test/external_crds/
 

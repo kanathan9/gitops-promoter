@@ -42,6 +42,7 @@ rules:
   resources:
   - jobs
   verbs:
+  - create
   - get
   - list
   - watch

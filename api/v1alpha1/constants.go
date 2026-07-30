@@ -17,6 +17,12 @@ const EnvironmentLabel = "promoter.argoproj.io/environment"
 // (for example promoter.argoproj.io/timed-commit-status for TimedCommitStatus).
 const CommitStatusGateLabelPrefix = "promoter.argoproj.io/"
 
+// JobCommitStatusShaLabel is the label recording the full hydrated commit SHA that a
+// JobCommitStatus-owned Job was created for. Combined with the parent-gate label and
+// EnvironmentLabel, it forms the identity used to detect an already-created Job for a given
+// parent/environment/sha tuple (see internal/controller.JobCommitStatusReconciler).
+const JobCommitStatusShaLabel = "promoter.argoproj.io/hydrated-sha"
+
 // ChangeTransferPolicyLabel the change transfer policy which the proposed commit is associated with.
 const ChangeTransferPolicyLabel = "promoter.argoproj.io/change-transfer-policy"
 
