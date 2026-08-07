@@ -876,7 +876,12 @@ var _ = Describe("JobCommitStatus Controller - Job Finalizer Lifecycle", Ordered
 		}, constants.EventuallyTimeout).Should(Succeed())
 
 		By("Verifying deletion is no longer blocked (what a real ttlSecondsAfterFinished cleanup relies on)")
-		Expect(k8sClient.Delete(ctx, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: jobKey.Name, Namespace: jobKey.Namespace}})).To(Succeed())
+		// Background propagation is requested explicitly: envtest runs no garbage-collector controller
+		// to process the API server's legacy "orphan" finalizer, which it otherwise attaches by default
+		// when a Delete request leaves PropagationPolicy unset — that finalizer has nothing to do with
+		// JobCommitStatusJobFinalizer (already confirmed removed above) and would leave the Job stuck
+		// Terminating forever in this test environment.
+		Expect(k8sClient.Delete(ctx, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: jobKey.Name, Namespace: jobKey.Namespace}}, client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
 		Eventually(func(g Gomega) {
 			var job batchv1.Job
 			err := k8sClient.Get(ctx, jobKey, &job)
