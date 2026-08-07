@@ -18,19 +18,26 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"os"
+	"strconv"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllertest"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -39,6 +46,57 @@ import (
 	"github.com/argoproj-labs/gitops-promoter/internal/types/constants"
 	"github.com/argoproj-labs/gitops-promoter/internal/utils"
 )
+
+// setJobCondition fetches the latest version of the Job named jobKey, sets its status to have
+// exactly one terminal condition (condType=True with the given reason/message) plus the given
+// succeeded count, and writes it via the status subresource — simulating what a real Job
+// controller would eventually report, since envtest runs no kubelet/job-controller to produce
+// this itself.
+func setJobCondition(ctx context.Context, jobKey types.NamespacedName, condType batchv1.JobConditionType, reason, message string, succeeded int32) {
+	var job batchv1.Job
+	Expect(k8sClient.Get(ctx, jobKey, &job)).To(Succeed())
+	job.Status.Succeeded = succeeded
+
+	now := metav1.NewTime(time.Now())
+	if job.Status.StartTime == nil {
+		// The API server requires status.startTime to be set on a finished Job.
+		job.Status.StartTime = &now
+	}
+
+	var conditions []batchv1.JobCondition
+	switch condType {
+	case batchv1.JobFailed:
+		// The API server requires a FailureTarget=True condition before a Failed=True condition
+		// can be set (Kubernetes' job-tracking-with-finalizers ordering).
+		conditions = append(conditions, batchv1.JobCondition{
+			Type:               batchv1.JobFailureTarget,
+			Status:             corev1.ConditionTrue,
+			LastTransitionTime: now,
+			Reason:             reason,
+			Message:            message,
+		})
+	case batchv1.JobComplete:
+		// The API server requires a SuccessCriteriaMet=True condition and status.completionTime
+		// before a Complete=True condition can be set.
+		conditions = append(conditions, batchv1.JobCondition{
+			Type:               batchv1.JobSuccessCriteriaMet,
+			Status:             corev1.ConditionTrue,
+			LastTransitionTime: now,
+		})
+		job.Status.CompletionTime = &now
+	default:
+	}
+	conditions = append(conditions, batchv1.JobCondition{
+		Type:               condType,
+		Status:             corev1.ConditionTrue,
+		LastTransitionTime: now,
+		Reason:             reason,
+		Message:            message,
+	})
+	job.Status.Conditions = conditions
+
+	Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
+}
 
 // jobCommitStatusWithValidTemplate returns a minimal, schema-valid JobCommitStatus so tests can
 // Create() it against a real API server (envtest) without tripping CRD validation.
@@ -111,8 +169,8 @@ var _ = Describe("JobCommitStatus Controller - Missing PromotionStrategy", Order
 // one container and one init container (so tests can verify env-var injection on both), and
 // caller-supplied labels/annotations on jobTemplate.metadata so tests can verify user fields
 // survive alongside the controller-reserved ones.
-func jobCommitStatusForGate(name, namespace, psName, key string, labels, annotations map[string]string) *promoterv1alpha1.JobCommitStatus {
-	jcs := jobCommitStatusWithValidTemplate(name, namespace, psName)
+func jobCommitStatusForGate(name, psName, key string, labels, annotations map[string]string) *promoterv1alpha1.JobCommitStatus {
+	jcs := jobCommitStatusWithValidTemplate(name, "default", psName)
 	jcs.Spec.Key = key
 	jcs.Spec.JobTemplate.Labels = labels
 	jcs.Spec.JobTemplate.Annotations = annotations
@@ -190,7 +248,7 @@ var _ = Describe("JobCommitStatus Controller - Job Creation", Ordered, func() {
 	})
 
 	It("creates one owned Job per applicable environment, with identity labels, an owner reference, preserved user fields, and injected context env vars", func() {
-		jcs = jobCommitStatusForGate(name+"-gate", "default", name, gateKey,
+		jcs = jobCommitStatusForGate(name+"-gate", name, gateKey,
 			map[string]string{"team": "platform"},
 			map[string]string{"example.com/note": "hello"},
 		)
@@ -347,7 +405,7 @@ var _ = Describe("JobCommitStatus Controller - New Proposed SHA", Ordered, func(
 			}
 		}, constants.EventuallyTimeout).Should(Succeed())
 
-		jcs = jobCommitStatusForGate(name+"-gate", "default", name, gateKey, nil, nil)
+		jcs = jobCommitStatusForGate(name+"-gate", name, gateKey, nil, nil)
 		Expect(k8sClient.Create(ctx, jcs)).To(Succeed())
 	})
 
@@ -418,6 +476,545 @@ var _ = Describe("JobCommitStatus Controller - New Proposed SHA", Ordered, func(
 		owned := ownedJobs(jobs.Items, &current)
 		Expect(owned).To(HaveLen(2))
 	})
+
+	It("does not let the older SHA's Job alter the newer SHA's status once it completes", func() {
+		var current promoterv1alpha1.JobCommitStatus
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+		Expect(current.Status.Environments).To(HaveLen(1))
+		trackedSha := current.Status.Environments[0].Sha
+		trackedJobRef := current.Status.Environments[0].JobRef
+		Expect(trackedJobRef).ToNot(BeNil())
+
+		var jobs batchv1.JobList
+		Expect(k8sClient.List(ctx, &jobs, client.InNamespace("default"))).To(Succeed())
+		owned := ownedJobs(jobs.Items, &current)
+		Expect(owned).To(HaveLen(2), "expected both the older and newer SHA's Jobs to still exist")
+
+		var olderJob *batchv1.Job
+		for i := range owned {
+			if owned[i].Name != trackedJobRef.Name {
+				olderJob = &owned[i]
+			}
+		}
+		Expect(olderJob).ToNot(BeNil(), "expected to find the Job for the older, untracked SHA")
+		Expect(olderJob.Labels[promoterv1alpha1.JobCommitStatusShaLabel]).ToNot(Equal(trackedSha))
+
+		By("Completing the older SHA's Job")
+		setJobCondition(ctx, types.NamespacedName{Name: olderJob.Name, Namespace: olderJob.Namespace},
+			batchv1.JobComplete, "", "", 1)
+
+		By("Verifying the tracked (newer) environment status and CommitStatus are unaffected")
+		Consistently(func(g Gomega) {
+			var after promoterv1alpha1.JobCommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &after)).To(Succeed())
+			g.Expect(after.Status.Environments).To(HaveLen(1))
+			g.Expect(after.Status.Environments[0].Sha).To(Equal(trackedSha))
+			g.Expect(after.Status.Environments[0].JobRef.Name).To(Equal(trackedJobRef.Name))
+			g.Expect(after.Status.Environments[0].Phase).To(Equal(promoterv1alpha1.CommitPhasePending))
+
+			var cs promoterv1alpha1.CommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.CommitStatusResourceName(ctx, &after, testBranchDevelopment),
+				Namespace: "default",
+			}, &cs)).To(Succeed())
+			g.Expect(cs.Spec.Sha).To(Equal(trackedSha))
+			g.Expect(cs.Spec.Phase).To(Equal(promoterv1alpha1.CommitPhasePending))
+		}, "3s", "500ms").Should(Succeed())
+	})
+})
+
+var _ = Describe("JobCommitStatus Controller - Job Observation", Ordered, func() {
+	var (
+		ctx               context.Context
+		name              string
+		scmSecret         *corev1.Secret
+		scmProvider       *promoterv1alpha1.ScmProvider
+		gitRepo           *promoterv1alpha1.GitRepository
+		promotionStrategy *promoterv1alpha1.PromotionStrategy
+		jcs               *promoterv1alpha1.JobCommitStatus
+		jobKey            types.NamespacedName
+		sha               string
+	)
+
+	const gateKey = "job-eval-gate-observation"
+
+	BeforeAll(func() {
+		ctx = context.Background()
+
+		name, scmSecret, scmProvider, gitRepo, _, _, promotionStrategy = promotionStrategyResource(ctx, "job-commit-status-observe-test", "default")
+		setupInitialTestGitRepoOnServer(ctx, gitRepo)
+
+		Expect(k8sClient.Create(ctx, scmSecret)).To(Succeed())
+		Expect(k8sClient.Create(ctx, scmProvider)).To(Succeed())
+		Expect(k8sClient.Create(ctx, gitRepo)).To(Succeed())
+		for i := range promotionStrategy.Spec.Environments {
+			if promotionStrategy.Spec.Environments[i].Branch == testBranchDevelopment {
+				promotionStrategy.Spec.Environments[i].ProposedCommitStatuses = []promoterv1alpha1.CommitStatusSelector{{Key: gateKey}}
+			}
+		}
+		Expect(k8sClient.Create(ctx, promotionStrategy)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			var ps promoterv1alpha1.PromotionStrategy
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &ps)).To(Succeed())
+			for _, env := range ps.Status.Environments {
+				if env.Branch == testBranchDevelopment {
+					g.Expect(env.Proposed.Hydrated.Sha).ToNot(BeEmpty())
+				}
+			}
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		jcs = jobCommitStatusForGate(name+"-gate", name, gateKey, nil, nil)
+		Expect(k8sClient.Create(ctx, jcs)).To(Succeed())
+	})
+
+	AfterAll(func() {
+		if jcs != nil {
+			_ = k8sClient.Delete(ctx, jcs)
+		}
+		if promotionStrategy != nil {
+			_ = k8sClient.Delete(ctx, promotionStrategy)
+		}
+		if gitRepo != nil {
+			_ = k8sClient.Delete(ctx, gitRepo)
+		}
+		if scmProvider != nil {
+			_ = k8sClient.Delete(ctx, scmProvider)
+		}
+		if scmSecret != nil {
+			_ = k8sClient.Delete(ctx, scmSecret)
+		}
+	})
+
+	It("reports pending, correlated to the proposed SHA, while the Job has no terminal condition", func() {
+		Eventually(func(g Gomega) {
+			var current promoterv1alpha1.JobCommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+			g.Expect(current.Status.Environments).To(HaveLen(1))
+			env := current.Status.Environments[0]
+			g.Expect(env.JobRef).ToNot(BeNil())
+			g.Expect(env.Phase).To(Equal(promoterv1alpha1.CommitPhasePending))
+			g.Expect(env.Reason).To(Equal("JobRunning"))
+			sha = env.Sha
+			jobKey = types.NamespacedName{Name: env.JobRef.Name, Namespace: env.JobRef.Namespace}
+
+			var cs promoterv1alpha1.CommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.CommitStatusResourceName(ctx, &current, testBranchDevelopment),
+				Namespace: "default",
+			}, &cs)).To(Succeed())
+			g.Expect(cs.Spec.Phase).To(Equal(promoterv1alpha1.CommitPhasePending))
+			g.Expect(cs.Spec.Sha).To(Equal(sha))
+		}, constants.EventuallyTimeout).Should(Succeed())
+	})
+
+	It("promptly reports success once the Job completes and success.when.expression passes", func() {
+		setJobCondition(ctx, jobKey, batchv1.JobComplete, "", "", 1)
+
+		Eventually(func(g Gomega) {
+			var current promoterv1alpha1.JobCommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+			g.Expect(current.Status.Environments).To(HaveLen(1))
+			env := current.Status.Environments[0]
+			g.Expect(env.Sha).To(Equal(sha))
+			g.Expect(env.Phase).To(Equal(promoterv1alpha1.CommitPhaseSuccess))
+			g.Expect(env.FinishedAt).ToNot(BeNil())
+
+			var cs promoterv1alpha1.CommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.CommitStatusResourceName(ctx, &current, testBranchDevelopment),
+				Namespace: "default",
+			}, &cs)).To(Succeed())
+			g.Expect(cs.Spec.Phase).To(Equal(promoterv1alpha1.CommitPhaseSuccess))
+			g.Expect(cs.Spec.Sha).To(Equal(sha))
+		}, constants.EventuallyTimeout).Should(Succeed())
+	})
+
+	It("does not churn resource versions when reconciling an unchanged terminal Job repeatedly", func() {
+		var before promoterv1alpha1.JobCommitStatus
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &before)).To(Succeed())
+		Expect(before.Status.Environments[0].Phase).To(Equal(promoterv1alpha1.CommitStatusPhase("success")))
+		beforeFinishedAt := before.Status.Environments[0].FinishedAt
+		Expect(beforeFinishedAt).ToNot(BeNil())
+
+		var beforeCS promoterv1alpha1.CommitStatus
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      utils.CommitStatusResourceName(ctx, &before, testBranchDevelopment),
+			Namespace: "default",
+		}, &beforeCS)).To(Succeed())
+
+		var beforeJob batchv1.Job
+		Expect(k8sClient.Get(ctx, jobKey, &beforeJob)).To(Succeed())
+
+		By("Forcing several more reconciles by touching an unrelated field repeatedly")
+		for i := 0; i < 3; i++ {
+			Eventually(func(g Gomega) {
+				var current promoterv1alpha1.JobCommitStatus
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+				if current.Annotations == nil {
+					current.Annotations = map[string]string{}
+				}
+				current.Annotations["test.gitops-promoter.io/touch"] = strconv.Itoa(i)
+				g.Expect(k8sClient.Update(ctx, &current)).To(Succeed())
+			}, constants.EventuallyTimeout).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				var current promoterv1alpha1.JobCommitStatus
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+				g.Expect(current.Status.ObservedGeneration).To(Equal(current.Generation))
+			}, constants.EventuallyTimeout).Should(Succeed())
+		}
+
+		var after promoterv1alpha1.JobCommitStatus
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &after)).To(Succeed())
+		Expect(after.Status.Environments[0].Phase).To(Equal(promoterv1alpha1.CommitPhaseSuccess))
+		Expect(after.Status.Environments[0].FinishedAt).To(Equal(beforeFinishedAt))
+
+		var afterCS promoterv1alpha1.CommitStatus
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      utils.CommitStatusResourceName(ctx, &after, testBranchDevelopment),
+			Namespace: "default",
+		}, &afterCS)).To(Succeed())
+		Expect(afterCS.ResourceVersion).To(Equal(beforeCS.ResourceVersion), "CommitStatus should not be re-applied when nothing changed")
+
+		var afterJob batchv1.Job
+		Expect(k8sClient.Get(ctx, jobKey, &afterJob)).To(Succeed())
+		Expect(afterJob.ResourceVersion).To(Equal(beforeJob.ResourceVersion), "Job must never be mutated by the controller")
+	})
+})
+
+var _ = Describe("JobCommitStatus Controller - Job Failure", Ordered, func() {
+	var (
+		ctx               context.Context
+		name              string
+		scmSecret         *corev1.Secret
+		scmProvider       *promoterv1alpha1.ScmProvider
+		gitRepo           *promoterv1alpha1.GitRepository
+		promotionStrategy *promoterv1alpha1.PromotionStrategy
+		jcs               *promoterv1alpha1.JobCommitStatus
+	)
+
+	const gateKey = "job-eval-gate-failure"
+
+	BeforeAll(func() {
+		ctx = context.Background()
+
+		name, scmSecret, scmProvider, gitRepo, _, _, promotionStrategy = promotionStrategyResource(ctx, "job-commit-status-failure-test", "default")
+		setupInitialTestGitRepoOnServer(ctx, gitRepo)
+
+		Expect(k8sClient.Create(ctx, scmSecret)).To(Succeed())
+		Expect(k8sClient.Create(ctx, scmProvider)).To(Succeed())
+		Expect(k8sClient.Create(ctx, gitRepo)).To(Succeed())
+		for i := range promotionStrategy.Spec.Environments {
+			if promotionStrategy.Spec.Environments[i].Branch == testBranchDevelopment {
+				promotionStrategy.Spec.Environments[i].ProposedCommitStatuses = []promoterv1alpha1.CommitStatusSelector{{Key: gateKey}}
+			}
+		}
+		Expect(k8sClient.Create(ctx, promotionStrategy)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			var ps promoterv1alpha1.PromotionStrategy
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &ps)).To(Succeed())
+			for _, env := range ps.Status.Environments {
+				if env.Branch == testBranchDevelopment {
+					g.Expect(env.Proposed.Hydrated.Sha).ToNot(BeEmpty())
+				}
+			}
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		// backoffLimit: 0 matches the human test plan's "non-zero Job with backoffLimit: 0" scenario;
+		// envtest runs no kubelet/job-controller, so the terminal Failed condition is simulated via
+		// setJobCondition rather than a real container exit.
+		jcs = jobCommitStatusForGate(name+"-gate", name, gateKey, nil, nil)
+		jcs.Spec.JobTemplate.Spec.BackoffLimit = ptr.To(int32(0))
+		Expect(k8sClient.Create(ctx, jcs)).To(Succeed())
+	})
+
+	AfterAll(func() {
+		if jcs != nil {
+			_ = k8sClient.Delete(ctx, jcs)
+		}
+		if promotionStrategy != nil {
+			_ = k8sClient.Delete(ctx, promotionStrategy)
+		}
+		if gitRepo != nil {
+			_ = k8sClient.Delete(ctx, gitRepo)
+		}
+		if scmProvider != nil {
+			_ = k8sClient.Delete(ctx, scmProvider)
+		}
+		if scmSecret != nil {
+			_ = k8sClient.Delete(ctx, scmSecret)
+		}
+	})
+
+	It("reports failure with a useful reason for a Failed Job", func() {
+		var jobKey types.NamespacedName
+		Eventually(func(g Gomega) {
+			var current promoterv1alpha1.JobCommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+			g.Expect(current.Status.Environments).To(HaveLen(1))
+			g.Expect(current.Status.Environments[0].JobRef).ToNot(BeNil())
+			jobKey = types.NamespacedName{
+				Name:      current.Status.Environments[0].JobRef.Name,
+				Namespace: current.Status.Environments[0].JobRef.Namespace,
+			}
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		setJobCondition(ctx, jobKey, batchv1.JobFailed, "BackoffLimitExceeded", "Job has reached the specified backoff limit", 0)
+
+		Eventually(func(g Gomega) {
+			var current promoterv1alpha1.JobCommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+			g.Expect(current.Status.Environments).To(HaveLen(1))
+			env := current.Status.Environments[0]
+			g.Expect(env.Phase).To(Equal(promoterv1alpha1.CommitPhaseFailure))
+			g.Expect(env.Reason).To(Equal("BackoffLimitExceeded"))
+
+			var cs promoterv1alpha1.CommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.CommitStatusResourceName(ctx, &current, testBranchDevelopment),
+				Namespace: "default",
+			}, &cs)).To(Succeed())
+			g.Expect(cs.Spec.Phase).To(Equal(promoterv1alpha1.CommitPhaseFailure))
+			g.Expect(cs.Spec.Description).To(ContainSubstring("BackoffLimitExceeded"))
+		}, constants.EventuallyTimeout).Should(Succeed())
+	})
+})
+
+var _ = Describe("JobCommitStatus Controller - Job Finalizer Lifecycle", Ordered, func() {
+	var (
+		ctx               context.Context
+		name              string
+		scmSecret         *corev1.Secret
+		scmProvider       *promoterv1alpha1.ScmProvider
+		gitRepo           *promoterv1alpha1.GitRepository
+		promotionStrategy *promoterv1alpha1.PromotionStrategy
+		jcs               *promoterv1alpha1.JobCommitStatus
+		jobKey            types.NamespacedName
+	)
+
+	const gateKey = "job-eval-gate-finalizer"
+
+	BeforeAll(func() {
+		ctx = context.Background()
+
+		name, scmSecret, scmProvider, gitRepo, _, _, promotionStrategy = promotionStrategyResource(ctx, "job-commit-status-finalizer-test", "default")
+		setupInitialTestGitRepoOnServer(ctx, gitRepo)
+
+		Expect(k8sClient.Create(ctx, scmSecret)).To(Succeed())
+		Expect(k8sClient.Create(ctx, scmProvider)).To(Succeed())
+		Expect(k8sClient.Create(ctx, gitRepo)).To(Succeed())
+		for i := range promotionStrategy.Spec.Environments {
+			if promotionStrategy.Spec.Environments[i].Branch == testBranchDevelopment {
+				promotionStrategy.Spec.Environments[i].ProposedCommitStatuses = []promoterv1alpha1.CommitStatusSelector{{Key: gateKey}}
+			}
+		}
+		Expect(k8sClient.Create(ctx, promotionStrategy)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			var ps promoterv1alpha1.PromotionStrategy
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &ps)).To(Succeed())
+			for _, env := range ps.Status.Environments {
+				if env.Branch == testBranchDevelopment {
+					g.Expect(env.Proposed.Hydrated.Sha).ToNot(BeEmpty())
+				}
+			}
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		jcs = jobCommitStatusForGate(name+"-gate", name, gateKey, nil, nil)
+		Expect(k8sClient.Create(ctx, jcs)).To(Succeed())
+	})
+
+	AfterAll(func() {
+		if jcs != nil {
+			_ = k8sClient.Delete(ctx, jcs)
+		}
+		if promotionStrategy != nil {
+			_ = k8sClient.Delete(ctx, promotionStrategy)
+		}
+		if gitRepo != nil {
+			_ = k8sClient.Delete(ctx, gitRepo)
+		}
+		if scmProvider != nil {
+			_ = k8sClient.Delete(ctx, scmProvider)
+		}
+		if scmSecret != nil {
+			_ = k8sClient.Delete(ctx, scmSecret)
+		}
+	})
+
+	It("adds a finalizer to the Job at creation", func() {
+		Eventually(func(g Gomega) {
+			var current promoterv1alpha1.JobCommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+			g.Expect(current.Status.Environments).To(HaveLen(1))
+			g.Expect(current.Status.Environments[0].JobRef).ToNot(BeNil())
+			jobKey = types.NamespacedName{
+				Name:      current.Status.Environments[0].JobRef.Name,
+				Namespace: current.Status.Environments[0].JobRef.Namespace,
+			}
+
+			var job batchv1.Job
+			g.Expect(k8sClient.Get(ctx, jobKey, &job)).To(Succeed())
+			g.Expect(job.Finalizers).To(ContainElement(promoterv1alpha1.JobCommitStatusJobFinalizer))
+		}, constants.EventuallyTimeout).Should(Succeed())
+	})
+
+	It("removes the finalizer once the CommitStatus reflects a terminal phase, unblocking deletion", func() {
+		setJobCondition(ctx, jobKey, batchv1.JobComplete, "", "", 1)
+
+		Eventually(func(g Gomega) {
+			var current promoterv1alpha1.JobCommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+			g.Expect(current.Status.Environments).To(HaveLen(1))
+			g.Expect(current.Status.Environments[0].Phase).To(Equal(promoterv1alpha1.CommitPhaseSuccess))
+
+			var job batchv1.Job
+			g.Expect(k8sClient.Get(ctx, jobKey, &job)).To(Succeed())
+			g.Expect(job.Finalizers).ToNot(ContainElement(promoterv1alpha1.JobCommitStatusJobFinalizer))
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		By("Verifying deletion is no longer blocked (what a real ttlSecondsAfterFinished cleanup relies on)")
+		Expect(k8sClient.Delete(ctx, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: jobKey.Name, Namespace: jobKey.Namespace}})).To(Succeed())
+		Eventually(func(g Gomega) {
+			var job batchv1.Job
+			err := k8sClient.Get(ctx, jobKey, &job)
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}, constants.EventuallyTimeout).Should(Succeed())
+	})
+})
+
+var _ = Describe("JobCommitStatus Controller - Environment Removal and Parent Deletion", Ordered, func() {
+	var (
+		ctx               context.Context
+		name              string
+		scmSecret         *corev1.Secret
+		scmProvider       *promoterv1alpha1.ScmProvider
+		gitRepo           *promoterv1alpha1.GitRepository
+		promotionStrategy *promoterv1alpha1.PromotionStrategy
+		jcs               *promoterv1alpha1.JobCommitStatus
+	)
+
+	const gateKey = "job-eval-gate-env-removal"
+
+	BeforeAll(func() {
+		ctx = context.Background()
+
+		name, scmSecret, scmProvider, gitRepo, _, _, promotionStrategy = promotionStrategyResource(ctx, "job-commit-status-env-removal-test", "default")
+		setupInitialTestGitRepoOnServer(ctx, gitRepo)
+
+		Expect(k8sClient.Create(ctx, scmSecret)).To(Succeed())
+		Expect(k8sClient.Create(ctx, scmProvider)).To(Succeed())
+		Expect(k8sClient.Create(ctx, gitRepo)).To(Succeed())
+		for i := range promotionStrategy.Spec.Environments {
+			if promotionStrategy.Spec.Environments[i].Branch == testBranchDevelopment || promotionStrategy.Spec.Environments[i].Branch == testBranchStaging {
+				promotionStrategy.Spec.Environments[i].ProposedCommitStatuses = []promoterv1alpha1.CommitStatusSelector{{Key: gateKey}}
+			}
+		}
+		Expect(k8sClient.Create(ctx, promotionStrategy)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			var ps promoterv1alpha1.PromotionStrategy
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &ps)).To(Succeed())
+			g.Expect(ps.Status.Environments).To(HaveLen(3))
+			for _, env := range ps.Status.Environments {
+				g.Expect(env.Proposed.Hydrated.Sha).ToNot(BeEmpty())
+			}
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		jcs = jobCommitStatusForGate(name+"-gate", name, gateKey, nil, nil)
+		Expect(k8sClient.Create(ctx, jcs)).To(Succeed())
+	})
+
+	AfterAll(func() {
+		if promotionStrategy != nil {
+			_ = k8sClient.Delete(ctx, promotionStrategy)
+		}
+		if gitRepo != nil {
+			_ = k8sClient.Delete(ctx, gitRepo)
+		}
+		if scmProvider != nil {
+			_ = k8sClient.Delete(ctx, scmProvider)
+		}
+		if scmSecret != nil {
+			_ = k8sClient.Delete(ctx, scmSecret)
+		}
+	})
+
+	It("cleans up the CommitStatus for a removed environment, and garbage-collects owned children on parent deletion", func() {
+		var developmentCSName, stagingCSName string
+		Eventually(func(g Gomega) {
+			var current promoterv1alpha1.JobCommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+			g.Expect(current.Status.Environments).To(HaveLen(2))
+			for _, env := range current.Status.Environments {
+				g.Expect(env.JobRef).ToNot(BeNil())
+			}
+			developmentCSName = utils.CommitStatusResourceName(ctx, &current, testBranchDevelopment)
+			stagingCSName = utils.CommitStatusResourceName(ctx, &current, testBranchStaging)
+
+			var cs promoterv1alpha1.CommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: stagingCSName, Namespace: "default"}, &cs)).To(Succeed())
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		By("Removing the staging environment from this gate")
+		Eventually(func(g Gomega) {
+			var ps promoterv1alpha1.PromotionStrategy
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &ps)).To(Succeed())
+			for i := range ps.Spec.Environments {
+				if ps.Spec.Environments[i].Branch == testBranchStaging {
+					ps.Spec.Environments[i].ProposedCommitStatuses = nil
+				}
+			}
+			g.Expect(k8sClient.Update(ctx, &ps)).To(Succeed())
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		By("Verifying the removed environment's CommitStatus is cleaned up, and the remaining one is untouched")
+		Eventually(func(g Gomega) {
+			var current promoterv1alpha1.JobCommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+			g.Expect(current.Status.Environments).To(HaveLen(1))
+			g.Expect(current.Status.Environments[0].Branch).To(Equal(testBranchDevelopment))
+
+			var stagingCS promoterv1alpha1.CommitStatus
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: stagingCSName, Namespace: "default"}, &stagingCS)
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+
+			var devCS promoterv1alpha1.CommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: developmentCSName, Namespace: "default"}, &devCS)).To(Succeed())
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		By("Capturing the remaining Job's owner reference before deleting the parent")
+		var current promoterv1alpha1.JobCommitStatus
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+		var job batchv1.Job
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      current.Status.Environments[0].JobRef.Name,
+			Namespace: current.Status.Environments[0].JobRef.Namespace,
+		}, &job)).To(Succeed())
+		jobOwnerRef := metav1.GetControllerOf(&job)
+		Expect(jobOwnerRef).ToNot(BeNil())
+		Expect(jobOwnerRef.UID).To(Equal(current.UID))
+		Expect(jobOwnerRef.Kind).To(Equal("JobCommitStatus"))
+
+		By("Deleting the parent JobCommitStatus")
+		Expect(k8sClient.Delete(ctx, &current)).To(Succeed())
+		Eventually(func(g Gomega) {
+			var deleted promoterv1alpha1.JobCommitStatus
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &deleted)
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		// envtest runs no garbage-collector controller, so the owned Job is not actually cascade-deleted
+		// here. What we can and do verify is the contract a real cluster's GC relies on: the Job's
+		// controller owner reference still points at the now-deleted parent's UID.
+		var stillJob batchv1.Job
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, &stillJob)).To(Succeed())
+		stillOwnerRef := metav1.GetControllerOf(&stillJob)
+		Expect(stillOwnerRef).ToNot(BeNil())
+		Expect(stillOwnerRef.UID).To(Equal(current.UID))
+	})
 })
 
 var _ = Describe("JobCommitStatus Controller - Reserved Labels", Ordered, func() {
@@ -462,7 +1059,7 @@ var _ = Describe("JobCommitStatus Controller - Reserved Labels", Ordered, func()
 	})
 
 	It("rejects a jobTemplate that sets a reserved label, and creates no Jobs", func() {
-		jcs = jobCommitStatusForGate("reserved-label-gate", "default", name, "reserved-label-gate",
+		jcs = jobCommitStatusForGate("reserved-label-gate", name, "reserved-label-gate",
 			map[string]string{promoterv1alpha1.EnvironmentLabel: "not-allowed"},
 			nil,
 		)
@@ -495,6 +1092,119 @@ func ownedJobs(jobs []batchv1.Job, parent *promoterv1alpha1.JobCommitStatus) []b
 		}
 	}
 	return out
+}
+
+// TestEnsureJobForEnvironment_IgnoresSpoofedJob verifies that a Job carrying the right identity
+// labels (parent, environment, sha) but NOT actually owned by this JobCommitStatus is never
+// treated as "the" Job for that environment: labels alone are attacker- or accident-controlled
+// (anyone who can create a Job in the namespace can set them), so only an ownership check
+// (metav1.IsControlledBy) can be trusted. ensureJobForEnvironment must create its own, properly
+// owned Job rather than reuse the spoofed one.
+func TestEnsureJobForEnvironment_IgnoresSpoofedJob(t *testing.T) {
+	t.Parallel()
+
+	scheme := utils.GetScheme()
+	ctx := t.Context()
+
+	jcs := jobCommitStatusWithValidTemplate("gate", "default", "ps-a")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(jcs).Build()
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(jcs), jcs); err != nil {
+		t.Fatalf("failed to get created JobCommitStatus: %v", err)
+	}
+
+	r := &JobCommitStatusReconciler{Client: cl, Scheme: scheme}
+	parentLabelKey := utils.CommitStatusGateLabelKeyForParent(jcs)
+	sha := "abc123def456789012345678901234567890abcd"
+
+	spoofed := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "spoofed-job",
+			Namespace: "default",
+			Labels: map[string]string{
+				parentLabelKey:                           utils.KubeSafeLabel(jcs.Name),
+				promoterv1alpha1.EnvironmentLabel:        utils.KubeSafeLabel(testBranchDevelopment),
+				promoterv1alpha1.JobCommitStatusShaLabel: sha,
+			},
+			// No OwnerReference to jcs: this Job is not actually owned by it.
+		},
+		Spec: batchv1.JobSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: "spoof", Image: "busybox"}},
+				},
+			},
+		},
+	}
+	if err := cl.Create(ctx, spoofed); err != nil {
+		t.Fatalf("failed to create spoofed Job: %v", err)
+	}
+
+	ps := &promoterv1alpha1.PromotionStrategy{
+		ObjectMeta: metav1.ObjectMeta{Name: "ps-a", Namespace: "default"},
+		Spec:       promoterv1alpha1.PromotionStrategySpec{RepositoryReference: promoterv1alpha1.ObjectReference{Name: "repo"}},
+	}
+
+	got, err := r.ensureJobForEnvironment(ctx, jcs, ps, parentLabelKey, testBranchDevelopment, sha)
+	if err != nil {
+		t.Fatalf("ensureJobForEnvironment returned an error: %v", err)
+	}
+	if got.Name == spoofed.Name {
+		t.Fatalf("ensureJobForEnvironment returned the spoofed Job %q instead of creating its own", spoofed.Name)
+	}
+	if !metav1.IsControlledBy(got, jcs) {
+		t.Fatal("ensureJobForEnvironment returned a Job not owned by the JobCommitStatus")
+	}
+
+	var jobs batchv1.JobList
+	if err := cl.List(ctx, &jobs, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list Jobs: %v", err)
+	}
+	if len(jobs.Items) != 2 {
+		t.Fatalf("expected the spoofed Job and one newly-created owned Job (2 total), got %d", len(jobs.Items))
+	}
+}
+
+// TestEnsureJobForEnvironment_ForbiddenCreate verifies that an RBAC-forbidden Job creation is
+// returned as a plain error (for the caller to report via a warning event and retry), not a panic
+// or a silently-swallowed failure.
+func TestEnsureJobForEnvironment_ForbiddenCreate(t *testing.T) {
+	t.Parallel()
+
+	scheme := utils.GetScheme()
+	ctx := t.Context()
+
+	jcs := jobCommitStatusWithValidTemplate("gate", "default", "ps-a")
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(jcs).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*batchv1.Job); ok {
+					return apierrors.NewForbidden(schema.GroupResource{Group: "batch", Resource: "jobs"}, obj.GetName(), errors.New("rbac: no create permission"))
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(jcs), jcs); err != nil {
+		t.Fatalf("failed to get created JobCommitStatus: %v", err)
+	}
+
+	r := &JobCommitStatusReconciler{Client: cl, Scheme: scheme}
+	parentLabelKey := utils.CommitStatusGateLabelKeyForParent(jcs)
+	ps := &promoterv1alpha1.PromotionStrategy{
+		ObjectMeta: metav1.ObjectMeta{Name: "ps-a", Namespace: "default"},
+		Spec:       promoterv1alpha1.PromotionStrategySpec{RepositoryReference: promoterv1alpha1.ObjectReference{Name: "repo"}},
+	}
+
+	_, err := r.ensureJobForEnvironment(ctx, jcs, ps, parentLabelKey, testBranchDevelopment, "abc123def456789012345678901234567890abcd")
+	if err == nil {
+		t.Fatal("expected an error from a forbidden Job creation, got nil")
+	}
+	if !apierrors.IsForbidden(err) {
+		t.Fatalf("expected a wrapped Forbidden error, got: %v", err)
+	}
 }
 
 // TestEnqueueJobCommitStatusForPromotionStrategy verifies that a changed PromotionStrategy only

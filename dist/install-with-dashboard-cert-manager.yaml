@@ -14369,8 +14369,10 @@ spec:
                       minLength: 1
                       type: string
                     finishedAt:
-                      description: FinishedAt is when the current/most recent Job
-                        reached a terminal state (Complete or Failed).
+                      description: |-
+                        FinishedAt is when the current/most recent Job reached a terminal state (Complete or Failed).
+                        This is taken from the terminal condition's own LastTransitionTime (not the reconcile time),
+                        so it stays stable across reconciles as long as the Job's conditions don't change.
                       format: date-time
                       type: string
                     jobRef:
@@ -14404,6 +14406,13 @@ spec:
                       - pending
                       - success
                       - failure
+                      type: string
+                    reason:
+                      description: |-
+                        Reason is a short, machine-readable reason for the current Phase. While terminal, it mirrors
+                        the finished Job's Complete/Failed condition reason (for example "DeadlineExceeded",
+                        "BackoffLimitExceeded"); otherwise it is a controller-synthesized reason (for example
+                        "JobRunning", "JobCreateFailed").
                       type: string
                     sha:
                       description: |-

@@ -185,8 +185,17 @@ type JobCommitStatusEnvironmentStatus struct {
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
 
 	// FinishedAt is when the current/most recent Job reached a terminal state (Complete or Failed).
+	// This is taken from the terminal condition's own LastTransitionTime (not the reconcile time),
+	// so it stays stable across reconciles as long as the Job's conditions don't change.
 	// +optional
 	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
+
+	// Reason is a short, machine-readable reason for the current Phase. While terminal, it mirrors
+	// the finished Job's Complete/Failed condition reason (for example "DeadlineExceeded",
+	// "BackoffLimitExceeded"); otherwise it is a controller-synthesized reason (for example
+	// "JobRunning", "JobCreateFailed").
+	// +optional
+	Reason string `json:"reason,omitempty"`
 }
 
 // JobCommitStatusJobReference references the child Job created for a given environment/SHA.

@@ -68,6 +68,14 @@ const ScmProviderSecretFinalizer = "scmprovider.promoter.argoproj.io/secret-fina
 // ClusterScmProviderSecretFinalizer prevents deletion of Secret while ClusterScmProvider references it
 const ClusterScmProviderSecretFinalizer = "clusterscmprovider.promoter.argoproj.io/secret-finalizer"
 
+// JobCommitStatusJobFinalizer is placed on each Job a JobCommitStatus creates, and removed only
+// once the controller has durably recorded that Job's terminal outcome in a CommitStatus. This
+// closes the race between the controller observing a finished Job and Kubernetes deleting it via
+// spec.jobTemplate.spec.ttlSecondsAfterFinished: without it, a short TTL could remove the Job
+// before the controller ever reads its terminal condition. It is the only field the controller
+// ever mutates on an already-created Job.
+const JobCommitStatusJobFinalizer = "jobcommitstatus.promoter.argoproj.io/finalizer"
+
 // InstanceIDLabel partitions resources between multiple controller installs sharing an API server.
 // Each install configures ControllerConfiguration.spec.instanceID (exact label match) or leaves it
 // unset (only unlabeled resources). Labeled and unlabeled resources are never reconciled together.

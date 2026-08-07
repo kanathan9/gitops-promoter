@@ -45,7 +45,14 @@ type JobCommitStatusEnvironmentStatusApplyConfiguration struct {
 	// StartedAt is when the current/most recent Job was created.
 	StartedAt *v1.Time `json:"startedAt,omitempty"`
 	// FinishedAt is when the current/most recent Job reached a terminal state (Complete or Failed).
+	// This is taken from the terminal condition's own LastTransitionTime (not the reconcile time),
+	// so it stays stable across reconciles as long as the Job's conditions don't change.
 	FinishedAt *v1.Time `json:"finishedAt,omitempty"`
+	// Reason is a short, machine-readable reason for the current Phase. While terminal, it mirrors
+	// the finished Job's Complete/Failed condition reason (for example "DeadlineExceeded",
+	// "BackoffLimitExceeded"); otherwise it is a controller-synthesized reason (for example
+	// "JobRunning", "JobCreateFailed").
+	Reason *string `json:"reason,omitempty"`
 }
 
 // JobCommitStatusEnvironmentStatusApplyConfiguration constructs a declarative configuration of the JobCommitStatusEnvironmentStatus type for use with
@@ -99,5 +106,13 @@ func (b *JobCommitStatusEnvironmentStatusApplyConfiguration) WithStartedAt(value
 // If called multiple times, the FinishedAt field is set to the value of the last call.
 func (b *JobCommitStatusEnvironmentStatusApplyConfiguration) WithFinishedAt(value v1.Time) *JobCommitStatusEnvironmentStatusApplyConfiguration {
 	b.FinishedAt = &value
+	return b
+}
+
+// WithReason sets the Reason field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the Reason field is set to the value of the last call.
+func (b *JobCommitStatusEnvironmentStatusApplyConfiguration) WithReason(value string) *JobCommitStatusEnvironmentStatusApplyConfiguration {
+	b.Reason = &value
 	return b
 }

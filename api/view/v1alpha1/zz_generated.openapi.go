@@ -3580,8 +3580,15 @@ func schema_argoproj_labs_gitops_promoter_api_v1alpha1_JobCommitStatusEnvironmen
 					},
 					"finishedAt": {
 						SchemaProps: spec.SchemaProps{
-							Description: "FinishedAt is when the current/most recent Job reached a terminal state (Complete or Failed).",
+							Description: "FinishedAt is when the current/most recent Job reached a terminal state (Complete or Failed). This is taken from the terminal condition's own LastTransitionTime (not the reconcile time), so it stays stable across reconciles as long as the Job's conditions don't change.",
 							Ref:         ref(metav1.Time{}.OpenAPIModelName()),
+						},
+					},
+					"reason": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Reason is a short, machine-readable reason for the current Phase. While terminal, it mirrors the finished Job's Complete/Failed condition reason (for example \"DeadlineExceeded\", \"BackoffLimitExceeded\"); otherwise it is a controller-synthesized reason (for example \"JobRunning\", \"JobCreateFailed\").",
+							Type:        []string{"string"},
+							Format:      "",
 						},
 					},
 				},
