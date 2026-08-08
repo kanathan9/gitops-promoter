@@ -21,6 +21,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +34,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,6 +46,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	promoterv1alpha1 "github.com/argoproj-labs/gitops-promoter/api/v1alpha1"
+	"github.com/argoproj-labs/gitops-promoter/internal/settings"
 	"github.com/argoproj-labs/gitops-promoter/internal/types/constants"
 	"github.com/argoproj-labs/gitops-promoter/internal/utils"
 )
@@ -681,6 +685,31 @@ var _ = Describe("JobCommitStatus Controller - Job Observation", Ordered, func()
 		Expect(k8sClient.Get(ctx, jobKey, &afterJob)).To(Succeed())
 		Expect(afterJob.ResourceVersion).To(Equal(beforeJob.ResourceVersion), "Job must never be mutated by the controller")
 	})
+
+	It("does not enqueue ChangeTransferPolicy reconciliation on a reconcile where nothing changed", func() {
+		// Standalone reconciler (not the shared manager's) so EnqueueCTP can be a spy: the
+		// JobCommitStatus is already terminal (Success) from the previous specs in this Ordered
+		// block, so this single direct call must find nothing changed for the tracked
+		// environment and never call EnqueueCTP. See the WebRequestCommitStatus stale-cache-guard
+		// tests for the established pattern of driving a standalone Reconcile() call against the
+		// shared envtest client outside the manager's own reconcile loop.
+		var enqueued []string
+		spyEnqueueCTP := func(namespace, name string) {
+			enqueued = append(enqueued, namespace+"/"+name)
+		}
+
+		r := &JobCommitStatusReconciler{
+			Client:      k8sClient,
+			Scheme:      k8sClient.Scheme(),
+			Recorder:    events.NewFakeRecorder(10),
+			SettingsMgr: settings.NewManager(k8sClient, k8sClient, settings.ManagerConfig{ControllerNamespace: "default"}),
+			EnqueueCTP:  spyEnqueueCTP,
+		}
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: jcs.Name, Namespace: "default"}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(enqueued).To(BeEmpty(), "an unchanged reconcile must not enqueue any ChangeTransferPolicy")
+	})
 })
 
 var _ = Describe("JobCommitStatus Controller - Job Failure", Ordered, func() {
@@ -1256,5 +1285,538 @@ func TestEnqueueJobCommitStatusForPromotionStrategy(t *testing.T) {
 	h.Generic(t.Context(), event.GenericEvent{Object: pod}, q2)
 	if q2.Len() != 0 {
 		t.Fatalf("expected no enqueued requests for a non-PromotionStrategy object, got %d", q2.Len())
+	}
+}
+
+// TestJobName table-tests the deterministic, DNS-safe naming scheme jobName uses to identify a
+// Job for a given parent/branch/sha triple.
+func TestJobName(t *testing.T) {
+	t.Parallel()
+
+	t.Run("deterministic for identical inputs", func(t *testing.T) {
+		t.Parallel()
+		a := jobName("gate", testBranchDevelopment, "abc123")
+		b := jobName("gate", testBranchDevelopment, "abc123")
+		if a != b {
+			t.Fatalf("expected the same inputs to always produce the same name, got %q and %q", a, b)
+		}
+	})
+
+	t.Run("differs when any single input differs", func(t *testing.T) {
+		t.Parallel()
+		base := jobName("gate", testBranchDevelopment, "abc123")
+		cases := map[string]string{
+			"parent name": jobName("other-gate", testBranchDevelopment, "abc123"),
+			"branch":      jobName("gate", testBranchStaging, "abc123"),
+			"sha":         jobName("gate", testBranchDevelopment, "def456"),
+		}
+		for label, other := range cases {
+			if other == base {
+				t.Errorf("expected a different name when only the %s differs, both were %q", label, base)
+			}
+		}
+	})
+
+	t.Run("always a valid DNS1123 label", func(t *testing.T) {
+		t.Parallel()
+		names := []string{
+			jobName("gate", testBranchDevelopment, "abc123"),
+			jobName(strings.Repeat("parent-", 20), strings.Repeat("environment/very-long-branch-name-", 5), strings.Repeat("f", 64)),
+			jobName("", "", ""),
+			jobName("!!!not-alphanumeric###", "***also-not***", "$$$sha$$$"),
+		}
+		for _, name := range names {
+			if errs := validation.IsDNS1123Label(name); len(errs) > 0 {
+				t.Errorf("jobName produced an invalid DNS1123 label %q: %v", name, errs)
+			}
+		}
+	})
+
+	t.Run("long inputs remain distinct via the hash suffix despite stem truncation", func(t *testing.T) {
+		t.Parallel()
+		longParent := strings.Repeat("a", 100)
+		n1 := jobName(longParent, testBranchDevelopment, "sha1")
+		n2 := jobName(longParent, testBranchDevelopment, "sha2")
+		if n1 == n2 {
+			t.Fatalf("expected distinct names for different SHAs even when the truncated stem is identical, got %q for both", n1)
+		}
+	})
+}
+
+// TestJobConditionDescription table-tests how a terminal Job condition's reason/message are
+// formatted into a human-readable CommitStatus description.
+func TestJobConditionDescription(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cond batchv1.JobCondition
+		want string
+	}{
+		{
+			name: "reason and message",
+			cond: batchv1.JobCondition{Type: batchv1.JobFailed, Reason: "BackoffLimitExceeded", Message: "Job has reached the specified backoff limit"},
+			want: "BackoffLimitExceeded: Job has reached the specified backoff limit",
+		},
+		{
+			name: "reason only",
+			cond: batchv1.JobCondition{Type: batchv1.JobFailed, Reason: "DeadlineExceeded"},
+			want: "DeadlineExceeded",
+		},
+		{
+			name: "message only",
+			cond: batchv1.JobCondition{Type: batchv1.JobComplete, Message: "all done"},
+			want: "all done",
+		},
+		{
+			name: "neither reason nor message falls back to the condition type",
+			cond: batchv1.JobCondition{Type: batchv1.JobComplete},
+			want: "Complete",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := jobConditionDescription(&tt.cond); got != tt.want {
+				t.Errorf("jobConditionDescription() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBoundedDescription table-tests truncation of CommitStatus descriptions to
+// maxCommitStatusDescriptionLength.
+func TestBoundedDescription(t *testing.T) {
+	t.Parallel()
+
+	short := "short description"
+	if got := boundedDescription(short); got != short {
+		t.Errorf("expected a short description to pass through unchanged, got %q", got)
+	}
+
+	exact := strings.Repeat("x", maxCommitStatusDescriptionLength)
+	if got := boundedDescription(exact); got != exact {
+		t.Errorf("expected a description exactly at the limit to pass through unchanged, got length %d", len(got))
+	}
+
+	long := strings.Repeat("x", maxCommitStatusDescriptionLength+50)
+	got := boundedDescription(long)
+	if len([]rune(got)) != maxCommitStatusDescriptionLength {
+		t.Errorf("expected truncation to exactly %d runes, got %d", maxCommitStatusDescriptionLength, len([]rune(got)))
+	}
+	if got != long[:maxCommitStatusDescriptionLength] {
+		t.Error("expected the truncated description to be a prefix of the original")
+	}
+}
+
+// TestValidateNoReservedJobLabels table-tests rejection of a jobTemplate that sets any of the
+// controller-reserved identity labels.
+func TestValidateNoReservedJobLabels(t *testing.T) {
+	t.Parallel()
+
+	const parentLabelKey = "promoter.argoproj.io/job-commit-status"
+
+	t.Run("no conflicting labels", func(t *testing.T) {
+		t.Parallel()
+		tmpl := &batchv1.JobTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"team": "platform"}}}
+		if err := validateNoReservedJobLabels(tmpl, parentLabelKey); err != nil {
+			t.Fatalf("expected no error for non-reserved labels, got %v", err)
+		}
+	})
+
+	t.Run("nil labels", func(t *testing.T) {
+		t.Parallel()
+		tmpl := &batchv1.JobTemplateSpec{}
+		if err := validateNoReservedJobLabels(tmpl, parentLabelKey); err != nil {
+			t.Fatalf("expected no error for a nil labels map, got %v", err)
+		}
+	})
+
+	for _, key := range reservedJobLabelKeys(parentLabelKey) {
+		t.Run("conflicts on reserved label "+key, func(t *testing.T) {
+			t.Parallel()
+			tmpl := &batchv1.JobTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{key: "user-supplied-value"}}}
+			err := validateNoReservedJobLabels(tmpl, parentLabelKey)
+			if err == nil {
+				t.Fatalf("expected an error for reserved label %q, got nil", key)
+			}
+			if !strings.Contains(err.Error(), "reserved label") {
+				t.Errorf("expected the error to mention 'reserved label', got: %v", err)
+			}
+		})
+	}
+}
+
+// TestInjectPromoterJobEnv verifies that the PROMOTER_JOB_* context env vars are appended to
+// every container and init container in a multi-container PodSpec, without disturbing any
+// env vars the user already set.
+func TestInjectPromoterJobEnv(t *testing.T) {
+	t.Parallel()
+
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{
+			{Name: "main", Env: []corev1.EnvVar{{Name: "USER_VAR", Value: "user-value"}}},
+			{Name: "sidecar"},
+		},
+		InitContainers: []corev1.Container{
+			{Name: "migrate", Env: []corev1.EnvVar{{Name: "OTHER_USER_VAR", Value: "other-value"}}},
+			{Name: "wait-for-deps"},
+		},
+	}
+
+	injectPromoterJobEnv(podSpec, "abc123", testBranchDevelopment, "my-ps", "my-repo")
+
+	want := map[string]string{
+		"PROMOTER_JOB_SHA":                "abc123",
+		"PROMOTER_JOB_BRANCH":             testBranchDevelopment,
+		"PROMOTER_JOB_PROMOTION_STRATEGY": "my-ps",
+		"PROMOTER_JOB_REPOSITORY":         "my-repo",
+	}
+
+	all := append(append([]corev1.Container{}, podSpec.Containers...), podSpec.InitContainers...)
+	for _, c := range all {
+		env := envVarMap(c.Env)
+		for k, v := range want {
+			if env[k] != v {
+				t.Errorf("container %q: expected %s=%q, got %q", c.Name, k, v, env[k])
+			}
+		}
+	}
+
+	if got := envVarMap(podSpec.Containers[0].Env)["USER_VAR"]; got != "user-value" {
+		t.Errorf("expected the user-provided env var on the main container to be preserved, got %q", got)
+	}
+	if got := envVarMap(podSpec.InitContainers[0].Env)["OTHER_USER_VAR"]; got != "other-value" {
+		t.Errorf("expected the user-provided env var on the init container to be preserved, got %q", got)
+	}
+	if len(podSpec.Containers[0].Env) != 5 {
+		t.Errorf("expected the main container to retain its 1 user var plus 4 injected vars (5 total), got %d", len(podSpec.Containers[0].Env))
+	}
+	if len(podSpec.Containers[1].Env) != 4 {
+		t.Errorf("expected the sidecar container (no prior env) to receive exactly the 4 injected vars, got %d", len(podSpec.Containers[1].Env))
+	}
+}
+
+// TestResolveJobSha table-tests which hydrated SHA (proposed vs. active) a Job is created
+// against, based on spec.reportOn.
+func TestResolveJobSha(t *testing.T) {
+	t.Parallel()
+
+	envStatus := &promoterv1alpha1.EnvironmentStatus{
+		Proposed: promoterv1alpha1.CommitBranchState{Hydrated: promoterv1alpha1.CommitShaState{Sha: "proposed-sha"}},
+		Active:   promoterv1alpha1.CommitBranchState{Hydrated: promoterv1alpha1.CommitShaState{Sha: "active-sha"}},
+	}
+
+	tests := []struct {
+		reportOn string
+		want     string
+	}{
+		{constants.CommitRefProposed, "proposed-sha"},
+		{"", "proposed-sha"}, // undocumented/empty defaults to proposed, same as the documented default.
+		{constants.CommitRefActive, "active-sha"},
+	}
+	for _, tt := range tests {
+		if got := resolveJobSha(envStatus, tt.reportOn); got != tt.want {
+			t.Errorf("resolveJobSha(reportOn=%q) = %q, want %q", tt.reportOn, got, tt.want)
+		}
+	}
+}
+
+// TestJobTerminalConditions table-tests which of a Job's conditions count as its terminal
+// Complete/Failed outcome, including the conflicting-both-True case.
+func TestJobTerminalConditions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		conditions   []batchv1.JobCondition
+		wantComplete bool
+		wantFailed   bool
+	}{
+		{name: "no conditions", conditions: nil},
+		{
+			name:         "Complete=True only",
+			conditions:   []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
+			wantComplete: true,
+		},
+		{
+			name:       "Failed=True only",
+			conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}},
+			wantFailed: true,
+		},
+		{
+			name: "both Complete=True and Failed=True is a conflict, not ignored",
+			conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+				{Type: batchv1.JobFailed, Status: corev1.ConditionTrue},
+			},
+			wantComplete: true,
+			wantFailed:   true,
+		},
+		{
+			name:       "Complete=False is ignored",
+			conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionFalse}},
+		},
+		{
+			name:       "an unrelated condition type is ignored",
+			conditions: []batchv1.JobCondition{{Type: batchv1.JobSuspended, Status: corev1.ConditionTrue}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			job := &batchv1.Job{Status: batchv1.JobStatus{Conditions: tt.conditions}}
+			complete, failed := jobTerminalConditions(job)
+			if (complete != nil) != tt.wantComplete {
+				t.Errorf("complete condition presence = %v, want %v", complete != nil, tt.wantComplete)
+			}
+			if (failed != nil) != tt.wantFailed {
+				t.Errorf("failed condition presence = %v, want %v", failed != nil, tt.wantFailed)
+			}
+		})
+	}
+}
+
+// TestObserveJob table-tests observeJob's phase/reason/description/finishedAt mapping across
+// every Job state it must handle: still-running, successful, failed, conflicting terminal
+// conditions, and a malformed success.when.expression. observeJob only reads its Job/JobCommitStatus
+// arguments and writes events, so these run against a bare reconciler with no client at all.
+func TestObserveJob(t *testing.T) {
+	t.Parallel()
+
+	newJCS := func(expression string) *promoterv1alpha1.JobCommitStatus {
+		jcs := jobCommitStatusWithValidTemplate("gate", "default", "ps-a")
+		jcs.Spec.Success.When.Expression = expression
+		return jcs
+	}
+	now := metav1.NewTime(time.Now())
+
+	t.Run("no terminal condition reports pending", func(t *testing.T) {
+		t.Parallel()
+		r := &JobCommitStatusReconciler{Recorder: events.NewFakeRecorder(10)}
+		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "job-a"}}
+
+		phase, reason, desc, finishedAt := r.observeJob(t.Context(), newJCS("Job.status.succeeded >= 1"), job, testBranchDevelopment)
+
+		if phase != promoterv1alpha1.CommitPhasePending {
+			t.Errorf("phase = %v, want Pending", phase)
+		}
+		if reason != "JobRunning" {
+			t.Errorf("reason = %q, want JobRunning", reason)
+		}
+		if finishedAt != nil {
+			t.Error("expected finishedAt to be nil while pending")
+		}
+		if !strings.Contains(desc, "job-a") {
+			t.Errorf("expected the description to mention the Job name, got %q", desc)
+		}
+	})
+
+	t.Run("Complete=True and a passing expression reports success", func(t *testing.T) {
+		t.Parallel()
+		r := &JobCommitStatusReconciler{Recorder: events.NewFakeRecorder(10)}
+		job := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: "job-b"},
+			Status: batchv1.JobStatus{
+				Succeeded:  1,
+				Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: now, Reason: "Completed"}},
+			},
+		}
+
+		phase, reason, _, finishedAt := r.observeJob(t.Context(), newJCS("Job.status.succeeded >= 1"), job, testBranchDevelopment)
+
+		if phase != promoterv1alpha1.CommitPhaseSuccess {
+			t.Errorf("phase = %v, want Success", phase)
+		}
+		if reason != "Completed" {
+			t.Errorf("reason = %q, want Completed", reason)
+		}
+		if finishedAt == nil || !finishedAt.Time.Equal(now.Time) {
+			t.Error("expected finishedAt to equal the Complete condition's LastTransitionTime")
+		}
+	})
+
+	t.Run("Complete=True but a failing expression reports failure", func(t *testing.T) {
+		t.Parallel()
+		r := &JobCommitStatusReconciler{Recorder: events.NewFakeRecorder(10)}
+		job := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: "job-c"},
+			Status: batchv1.JobStatus{
+				Succeeded:  0,
+				Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: now}},
+			},
+		}
+
+		phase, _, _, _ := r.observeJob(t.Context(), newJCS("Job.status.succeeded >= 1"), job, testBranchDevelopment)
+
+		if phase != promoterv1alpha1.CommitPhaseFailure {
+			t.Errorf("phase = %v, want Failure", phase)
+		}
+	})
+
+	t.Run("Failed=True reports failure using the condition's own reason and message", func(t *testing.T) {
+		t.Parallel()
+		r := &JobCommitStatusReconciler{Recorder: events.NewFakeRecorder(10)}
+		job := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: "job-d"},
+			Status: batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: now,
+					Reason: "BackoffLimitExceeded", Message: "too many retries",
+				}},
+			},
+		}
+
+		phase, reason, desc, finishedAt := r.observeJob(t.Context(), newJCS("Job.status.succeeded >= 1"), job, testBranchDevelopment)
+
+		if phase != promoterv1alpha1.CommitPhaseFailure {
+			t.Errorf("phase = %v, want Failure", phase)
+		}
+		if reason != "BackoffLimitExceeded" {
+			t.Errorf("reason = %q, want BackoffLimitExceeded", reason)
+		}
+		if !strings.Contains(desc, "too many retries") {
+			t.Errorf("expected the description to include the condition message, got %q", desc)
+		}
+		if finishedAt == nil {
+			t.Error("expected finishedAt to be set for a Failed Job")
+		}
+	})
+
+	t.Run("conflicting Complete and Failed conditions report failure and emit a warning event", func(t *testing.T) {
+		t.Parallel()
+		recorder := events.NewFakeRecorder(10)
+		r := &JobCommitStatusReconciler{Recorder: recorder}
+		job := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: "job-e"},
+			Status: batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{
+					{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: now},
+					{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: now},
+				},
+			},
+		}
+
+		phase, reason, _, _ := r.observeJob(t.Context(), newJCS("Job.status.succeeded >= 1"), job, testBranchDevelopment)
+
+		if phase != promoterv1alpha1.CommitPhaseFailure {
+			t.Errorf("phase = %v, want Failure", phase)
+		}
+		if reason != "ConflictingJobConditions" {
+			t.Errorf("reason = %q, want ConflictingJobConditions", reason)
+		}
+		select {
+		case evt := <-recorder.Events:
+			if !strings.Contains(evt, "Warning") || !strings.Contains(evt, "JobConditionConflict") {
+				t.Errorf("expected a Warning JobConditionConflict event, got %q", evt)
+			}
+		default:
+			t.Error("expected a warning event to be recorded for conflicting conditions")
+		}
+	})
+
+	t.Run("a malformed success expression reports failure and emits a warning event", func(t *testing.T) {
+		t.Parallel()
+		recorder := events.NewFakeRecorder(10)
+		r := &JobCommitStatusReconciler{Recorder: recorder}
+		job := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: "job-f"},
+			Status: batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: now}},
+			},
+		}
+
+		phase, reason, desc, _ := r.observeJob(t.Context(), newJCS("Job.status.succeeded >>> 1"), job, testBranchDevelopment)
+
+		if phase != promoterv1alpha1.CommitPhaseFailure {
+			t.Errorf("phase = %v, want Failure", phase)
+		}
+		if reason != "SuccessExpressionError" {
+			t.Errorf("reason = %q, want SuccessExpressionError", reason)
+		}
+		if desc == "" {
+			t.Error("expected a non-empty description explaining the expression error")
+		}
+		select {
+		case evt := <-recorder.Events:
+			if !strings.Contains(evt, "Warning") || !strings.Contains(evt, "SuccessExpressionError") {
+				t.Errorf("expected a Warning SuccessExpressionError event, got %q", evt)
+			}
+		default:
+			t.Error("expected a warning event to be recorded for a malformed expression")
+		}
+	})
+}
+
+// TestReconcile_NoProposedShaYet verifies that Reconcile fails loudly (an error the standard
+// rate-limited retry will act on, and a Ready=False condition) rather than panicking or silently
+// creating a Job, when the referenced PromotionStrategy's status has an applicable environment but
+// no hydrated SHA for it yet (e.g. not fully reconciled). Uses a fake client (not envtest): this
+// scenario needs full control over PromotionStrategy.Status without racing the real
+// PromotionStrategy controller, which always fully populates it.
+//
+//nolint:paralleltest // mutates the package-global controller instance ID cache via SetControllerInstanceIDForTest below; must not race other tests touching it.
+func TestReconcile_NoProposedShaYet(t *testing.T) {
+	restore := settings.SetControllerInstanceIDForTest(nil)
+	defer restore()
+
+	scheme := utils.GetScheme()
+	ctx := t.Context()
+
+	jcs := jobCommitStatusWithValidTemplate("gate", "default", "ps-a")
+	ps := &promoterv1alpha1.PromotionStrategy{
+		ObjectMeta: metav1.ObjectMeta{Name: "ps-a", Namespace: "default"},
+		Spec: promoterv1alpha1.PromotionStrategySpec{
+			RepositoryReference:    promoterv1alpha1.ObjectReference{Name: "repo"},
+			ProposedCommitStatuses: []promoterv1alpha1.CommitStatusSelector{{Key: jcs.Spec.Key}},
+			Environments:           []promoterv1alpha1.Environment{{Branch: testBranchDevelopment}},
+		},
+		Status: promoterv1alpha1.PromotionStrategyStatus{
+			Environments: []promoterv1alpha1.EnvironmentStatus{
+				{Branch: testBranchDevelopment}, // Proposed.Hydrated.Sha left empty: not yet hydrated.
+			},
+		},
+	}
+	controllerConfig := &promoterv1alpha1.ControllerConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: settings.ControllerConfigurationName, Namespace: "default"},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(jcs, ps, controllerConfig).
+		WithStatusSubresource(jcs, ps).
+		Build()
+
+	r := &JobCommitStatusReconciler{
+		Client:      cl,
+		Scheme:      scheme,
+		Recorder:    events.NewFakeRecorder(10),
+		SettingsMgr: settings.NewManager(cl, cl, settings.ManagerConfig{ControllerNamespace: "default"}),
+	}
+
+	_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(jcs)})
+	if err == nil {
+		t.Fatal("expected an error when the PromotionStrategy has no hydrated SHA yet, got nil")
+	}
+	if !strings.Contains(err.Error(), "no SHA available") {
+		t.Fatalf("expected the error to explain the missing SHA, got: %v", err)
+	}
+
+	var jobs batchv1.JobList
+	if err := cl.List(ctx, &jobs, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list Jobs: %v", err)
+	}
+	if len(jobs.Items) != 0 {
+		t.Fatalf("expected no Job to be created when no SHA is available yet, got %d", len(jobs.Items))
+	}
+
+	var after promoterv1alpha1.JobCommitStatus
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(jcs), &after); err != nil {
+		t.Fatalf("failed to get JobCommitStatus: %v", err)
+	}
+	readyCondition := meta.FindStatusCondition(after.Status.Conditions, "Ready")
+	if readyCondition == nil || readyCondition.Status != metav1.ConditionFalse {
+		t.Fatalf("expected Ready=False, got %+v", readyCondition)
 	}
 }
