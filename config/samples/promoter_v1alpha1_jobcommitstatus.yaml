@@ -1,0 +1,44 @@
+apiVersion: promoter.argoproj.io/v1alpha1
+kind: JobCommitStatus
+metadata:
+  labels:
+    app.kubernetes.io/name: promoter
+    app.kubernetes.io/managed-by: kustomize
+  name: jobcommitstatus-sample
+spec:
+  key: eval-gate  # must match PromotionStrategy proposedCommitStatuses
+  promotionStrategyRef:
+    name: promotionstrategy-sample
+  reportOn: proposed
+  descriptionTemplate: 'eval check ({{ .Branch }}): {{ .Phase }}'
+  success:
+    when:
+      # Documented reasonable default: the main container exited 0. Multi-completion Jobs should
+      # compare against the configured completions instead (e.g. "Job.status.succeeded >= 3"), and
+      # Jobs that need to distinguish a real failure from an infrastructure problem (ImagePullBackOff,
+      # OOMKilled) can inspect Job.status and pod/container statuses in this expression.
+      expression: 'Job.status.succeeded >= 1'
+  jobTemplate:
+    # Only metadata.labels/.annotations VALUES are templated (same variables as descriptionTemplate);
+    # the rest of the Job spec, including the Pod template below, is used verbatim. Branch is
+    # sanitized here because label values can't contain "/" (annotation values have no such limit).
+    metadata:
+      labels:
+        example.com/branch: '{{ .Branch | replace "/" "-" }}'
+      annotations:
+        example.com/branch: '{{ .Branch }}'
+    spec:
+      # Native Job mechanics do all the lifecycle work the controller doesn't reimplement:
+      backoffLimit: 0               # fail fast; set higher to let Job retry transient failures itself
+      activeDeadlineSeconds: 600    # 10m timeout; Job is marked Failed if exceeded
+      ttlSecondsAfterFinished: 86400 # 24h; Kubernetes garbage-collects the Job (and its Pods) after this
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: check
+              image: busybox:stable
+              # PROMOTER_JOB_SHA, PROMOTER_JOB_BRANCH, PROMOTER_JOB_PROMOTION_STRATEGY, and
+              # PROMOTER_JOB_REPOSITORY are appended to every container/init container automatically —
+              # no need to declare them here.
+              command: ["sh", "-c", "echo \"checking $PROMOTER_JOB_BRANCH at $PROMOTER_JOB_SHA\" && exit 0"]

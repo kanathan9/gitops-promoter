@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -364,6 +365,157 @@ var _ = Describe("JobCommitStatus Controller - Job Creation", Ordered, func() {
 			g.Expect(k8sClient.List(ctx, &after, client.InNamespace("default"))).To(Succeed())
 			g.Expect(ownedJobs(after.Items, &current)).To(HaveLen(beforeCount))
 		}, "3s", "500ms").Should(Succeed())
+	})
+})
+
+var _ = Describe("JobCommitStatus Controller - Templating", Ordered, func() {
+	var (
+		ctx               context.Context
+		name              string
+		scmSecret         *corev1.Secret
+		scmProvider       *promoterv1alpha1.ScmProvider
+		gitRepo           *promoterv1alpha1.GitRepository
+		promotionStrategy *promoterv1alpha1.PromotionStrategy
+		jcs               *promoterv1alpha1.JobCommitStatus
+		jobKey            types.NamespacedName
+	)
+
+	const gateKey = "job-eval-gate-templating"
+
+	BeforeAll(func() {
+		ctx = context.Background()
+
+		name, scmSecret, scmProvider, gitRepo, _, _, promotionStrategy = promotionStrategyResource(ctx, "job-commit-status-templating-test", "default")
+		setupInitialTestGitRepoOnServer(ctx, gitRepo)
+
+		Expect(k8sClient.Create(ctx, scmSecret)).To(Succeed())
+		Expect(k8sClient.Create(ctx, scmProvider)).To(Succeed())
+		Expect(k8sClient.Create(ctx, gitRepo)).To(Succeed())
+		for i := range promotionStrategy.Spec.Environments {
+			if promotionStrategy.Spec.Environments[i].Branch == testBranchDevelopment {
+				promotionStrategy.Spec.Environments[i].ProposedCommitStatuses = []promoterv1alpha1.CommitStatusSelector{{Key: gateKey}}
+			}
+		}
+		Expect(k8sClient.Create(ctx, promotionStrategy)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			var ps promoterv1alpha1.PromotionStrategy
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &ps)).To(Succeed())
+			for _, env := range ps.Status.Environments {
+				if env.Branch == testBranchDevelopment {
+					g.Expect(env.Proposed.Hydrated.Sha).ToNot(BeEmpty())
+				}
+			}
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		jcs = jobCommitStatusForGate(name+"-gate", name, gateKey, nil, nil)
+		// PromotionStrategy.Name is DNS-label-safe (unlike Branch, which contains "/" and would be
+		// an invalid label value), so it's used here to prove label templating renders a real
+		// controller-computed value, not just a literal passthrough.
+		jcs.Spec.JobTemplate.Labels = map[string]string{"example.com/ps-name": "{{ .PromotionStrategy.Name }}"}
+		jcs.Spec.JobTemplate.Annotations = map[string]string{"example.com/branch": "{{ .Branch }}"}
+		jcs.Spec.DescriptionTemplate = `{{ .Branch }} gate for {{ .PromotionStrategy.Name }} ({{ .JobCommitStatus.Spec.Key }}){{ if .Job }} - job {{ .Job.Name }} finished{{ end }}`
+		Expect(k8sClient.Create(ctx, jcs)).To(Succeed())
+	})
+
+	AfterAll(func() {
+		if jcs != nil {
+			_ = k8sClient.Delete(ctx, jcs)
+		}
+		if promotionStrategy != nil {
+			_ = k8sClient.Delete(ctx, promotionStrategy)
+		}
+		if gitRepo != nil {
+			_ = k8sClient.Delete(ctx, gitRepo)
+		}
+		if scmProvider != nil {
+			_ = k8sClient.Delete(ctx, scmProvider)
+		}
+		if scmSecret != nil {
+			_ = k8sClient.Delete(ctx, scmSecret)
+		}
+	})
+
+	It("renders jobTemplate.metadata.labels/annotations and a pending descriptionTemplate with Job absent", func() {
+		var current promoterv1alpha1.JobCommitStatus
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+			g.Expect(current.Status.Environments).To(HaveLen(1))
+			g.Expect(current.Status.Environments[0].JobRef).ToNot(BeNil())
+			jobKey = types.NamespacedName{
+				Name:      current.Status.Environments[0].JobRef.Name,
+				Namespace: current.Status.Environments[0].JobRef.Namespace,
+			}
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		var job batchv1.Job
+		Expect(k8sClient.Get(ctx, jobKey, &job)).To(Succeed())
+		Expect(job.Labels["example.com/ps-name"]).To(Equal(name), "label value should render PromotionStrategy.Name, not the literal template string")
+		Expect(job.Annotations["example.com/branch"]).To(Equal(testBranchDevelopment))
+
+		Eventually(func(g Gomega) {
+			var cs promoterv1alpha1.CommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.CommitStatusResourceName(ctx, &current, testBranchDevelopment),
+				Namespace: "default",
+			}, &cs)).To(Succeed())
+			g.Expect(cs.Spec.Description).To(Equal(fmt.Sprintf("%s gate for %s (%s)", testBranchDevelopment, name, gateKey)),
+				"while pending, .Job must render as absent (nil), so the \"- job ... finished\" clause is omitted")
+		}, constants.EventuallyTimeout).Should(Succeed())
+	})
+
+	It("reports a warning event and Ready=False when descriptionTemplate is malformed, without corrupting phase", func() {
+		// Must run while the environment is still pending (not yet terminal): once a SHA reaches a
+		// terminal phase, Reconcile treats it as durably decided and skips re-evaluating the Job or
+		// any template for that SHA entirely (see the "already terminal" short-circuit in Reconcile) —
+		// so a template edit made after completion would never even be attempted.
+		var current promoterv1alpha1.JobCommitStatus
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+		beforePhase := current.Status.Environments[0].Phase
+		Expect(beforePhase).To(Equal(promoterv1alpha1.CommitPhasePending), "sanity: this test requires a still-pending environment")
+
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+			current.Spec.DescriptionTemplate = "{{ .NotAField.Broken }}"
+			g.Expect(k8sClient.Update(ctx, &current)).To(Succeed())
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+			readyCondition := meta.FindStatusCondition(current.Status.Conditions, "Ready")
+			g.Expect(readyCondition).ToNot(BeNil())
+			g.Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(readyCondition.Message).To(ContainSubstring("descriptionTemplate"))
+			// The phase computed from the Job's own condition must survive a broken cosmetic template.
+			g.Expect(current.Status.Environments[0].Phase).To(Equal(beforePhase))
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		By("Restoring a valid descriptionTemplate so the remaining specs proceed normally")
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+			current.Spec.DescriptionTemplate = jcs.Spec.DescriptionTemplate
+			g.Expect(k8sClient.Update(ctx, &current)).To(Succeed())
+		}, constants.EventuallyTimeout).Should(Succeed())
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jcs.Name, Namespace: "default"}, &current)).To(Succeed())
+			readyCondition := meta.FindStatusCondition(current.Status.Conditions, "Ready")
+			g.Expect(readyCondition).ToNot(BeNil())
+			g.Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
+		}, constants.EventuallyTimeout).Should(Succeed())
+	})
+
+	It("renders the finished Job into descriptionTemplate once terminal", func() {
+		setJobCondition(ctx, jobKey, batchv1.JobComplete, "", "", 1)
+
+		Eventually(func(g Gomega) {
+			var cs promoterv1alpha1.CommitStatus
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.CommitStatusResourceName(ctx, jcs, testBranchDevelopment),
+				Namespace: "default",
+			}, &cs)).To(Succeed())
+			g.Expect(cs.Spec.Phase).To(Equal(promoterv1alpha1.CommitPhaseSuccess))
+			g.Expect(cs.Spec.Description).To(Equal(fmt.Sprintf("%s gate for %s (%s) - job %s finished", testBranchDevelopment, name, gateKey, jobKey.Name)))
+		}, constants.EventuallyTimeout).Should(Succeed())
 	})
 })
 
@@ -751,6 +903,29 @@ var _ = Describe("JobCommitStatus Controller - Job Failure", Ordered, func() {
 			}
 		}, constants.EventuallyTimeout).Should(Succeed())
 
+		// The initial hydration above leaves "environment/development-next" and "environment/development"
+		// in sync (no promotion needed yet), so ChangeTransferPolicy creates no pull request for it — the
+		// "blocks the pull request from merging" spec below needs one to exist. Push one real change so a
+		// pull request actually gets opened, before jcs (and its Job) are created against this SHA.
+		By("Advancing the proposed commit so a promotion pull request exists")
+		gitPath, err := os.MkdirTemp("", "jobcommitstatus-failure-test-*")
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { _ = os.RemoveAll(gitPath) }()
+		makeChangeAndHydrateRepo(gitPath, gitRepo, "advance for job failure test", "advance for job failure test")
+
+		Eventually(func(g Gomega) {
+			var prList promoterv1alpha1.PullRequestList
+			g.Expect(k8sClient.List(ctx, &prList, client.InNamespace("default"))).To(Succeed())
+			found := false
+			for i := range prList.Items {
+				if prList.Items[i].Spec.RepositoryReference.Name == gitRepo.Name && prList.Items[i].Spec.TargetBranch == testBranchDevelopment {
+					found = true
+					break
+				}
+			}
+			g.Expect(found).To(BeTrue(), "expected a pull request promoting into %s", testBranchDevelopment)
+		}, constants.EventuallyTimeout).Should(Succeed())
+
 		// backoffLimit: 0 matches the human test plan's "non-zero Job with backoffLimit: 0" scenario;
 		// envtest runs no kubelet/job-controller, so the terminal Failed condition is simulated via
 		// setJobCondition rather than a real container exit.
@@ -808,6 +983,35 @@ var _ = Describe("JobCommitStatus Controller - Job Failure", Ordered, func() {
 			g.Expect(cs.Spec.Phase).To(Equal(promoterv1alpha1.CommitPhaseFailure))
 			g.Expect(cs.Spec.Description).To(ContainSubstring("BackoffLimitExceeded"))
 		}, constants.EventuallyTimeout).Should(Succeed())
+	})
+
+	It("blocks the pull request from merging while the gate reports failure", func() {
+		// ChangeTransferPolicyReconciler.mergePullRequests only merges once every proposed commit
+		// status is success (see changetransferpolicy_controller.go); this proves that shared,
+		// gate-agnostic blocking mechanism actually engages for a failed JobCommitStatus gate, not
+		// just that the CommitStatus phase is reported correctly.
+		findPR := func(g Gomega) *promoterv1alpha1.PullRequest {
+			var prList promoterv1alpha1.PullRequestList
+			g.Expect(k8sClient.List(ctx, &prList, client.InNamespace("default"))).To(Succeed())
+			for i := range prList.Items {
+				if prList.Items[i].Spec.RepositoryReference.Name == gitRepo.Name && prList.Items[i].Spec.TargetBranch == testBranchDevelopment {
+					return &prList.Items[i]
+				}
+			}
+			return nil
+		}
+
+		Eventually(func(g Gomega) {
+			pr := findPR(g)
+			g.Expect(pr).ToNot(BeNil(), "expected to find the pull request promoting into %s", testBranchDevelopment)
+			g.Expect(pr.Spec.State).To(Equal(promoterv1alpha1.PullRequestOpen), "a failing gate must keep the pull request open, never merged")
+		}, constants.EventuallyTimeout).Should(Succeed())
+
+		Consistently(func(g Gomega) {
+			pr := findPR(g)
+			g.Expect(pr).ToNot(BeNil())
+			g.Expect(pr.Spec.State).To(Equal(promoterv1alpha1.PullRequestOpen), "a failing gate must keep the pull request open, never merged")
+		}, "3s", "500ms").Should(Succeed())
 	})
 })
 
@@ -1179,7 +1383,7 @@ func TestEnsureJobForEnvironment_IgnoresSpoofedJob(t *testing.T) {
 		Spec:       promoterv1alpha1.PromotionStrategySpec{RepositoryReference: promoterv1alpha1.ObjectReference{Name: "repo"}},
 	}
 
-	got, err := r.ensureJobForEnvironment(ctx, jcs, ps, parentLabelKey, testBranchDevelopment, sha)
+	got, err := r.ensureJobForEnvironment(ctx, jcs, ps, parentLabelKey, testBranchDevelopment, sha, jobNamespaceMetadata{})
 	if err != nil {
 		t.Fatalf("ensureJobForEnvironment returned an error: %v", err)
 	}
@@ -1232,7 +1436,7 @@ func TestEnsureJobForEnvironment_ForbiddenCreate(t *testing.T) {
 		Spec:       promoterv1alpha1.PromotionStrategySpec{RepositoryReference: promoterv1alpha1.ObjectReference{Name: "repo"}},
 	}
 
-	_, err := r.ensureJobForEnvironment(ctx, jcs, ps, parentLabelKey, testBranchDevelopment, "abc123def456789012345678901234567890abcd")
+	_, err := r.ensureJobForEnvironment(ctx, jcs, ps, parentLabelKey, testBranchDevelopment, "abc123def456789012345678901234567890abcd", jobNamespaceMetadata{})
 	if err == nil {
 		t.Fatal("expected an error from a forbidden Job creation, got nil")
 	}
@@ -1781,10 +1985,11 @@ func TestReconcile_NoProposedShaYet(t *testing.T) {
 	controllerConfig := &promoterv1alpha1.ControllerConfiguration{
 		ObjectMeta: metav1.ObjectMeta{Name: settings.ControllerConfigurationName, Namespace: "default"},
 	}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(jcs, ps, controllerConfig).
+		WithObjects(jcs, ps, controllerConfig, namespace).
 		WithStatusSubresource(jcs, ps).
 		Build()
 
@@ -1820,3 +2025,98 @@ func TestReconcile_NoProposedShaYet(t *testing.T) {
 		t.Fatalf("expected Ready=False, got %+v", readyCondition)
 	}
 }
+
+// TestRenderJobMetadataTemplates table-tests renderJobMetadataTemplates: keys are never templated
+// (only values), a nil map stays nil (not an empty map), and a bad template in either map is
+// reported with the offending key in the error.
+func TestRenderJobMetadataTemplates(t *testing.T) {
+	t.Parallel()
+
+	ps := &promoterv1alpha1.PromotionStrategy{ObjectMeta: metav1.ObjectMeta{Name: "my-ps"}}
+	jcs := jobCommitStatusWithValidTemplate("gate", "default", "my-ps")
+
+	t.Run("nil labels and annotations stay nil", func(t *testing.T) {
+		t.Parallel()
+		labels, annotations, err := renderJobMetadataTemplates(jcs, ps, testBranchDevelopment, jobNamespaceMetadata{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if labels != nil {
+			t.Errorf("expected nil labels, got %v", labels)
+		}
+		if annotations != nil {
+			t.Errorf("expected nil annotations, got %v", annotations)
+		}
+	})
+
+	t.Run("values render, keys stay literal", func(t *testing.T) {
+		t.Parallel()
+		templated := jobCommitStatusWithValidTemplate("gate", "default", "my-ps")
+		templated.Spec.JobTemplate.Labels = map[string]string{"example.com/ps-name": "{{ .PromotionStrategy.Name }}"}
+		templated.Spec.JobTemplate.Annotations = map[string]string{"example.com/branch": "{{ .Branch }}"}
+
+		labels, annotations, err := renderJobMetadataTemplates(templated, ps, testBranchDevelopment, jobNamespaceMetadata{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if labels["example.com/ps-name"] != "my-ps" {
+			t.Errorf("expected rendered label value %q, got %q", "my-ps", labels["example.com/ps-name"])
+		}
+		if annotations["example.com/branch"] != testBranchDevelopment {
+			t.Errorf("expected rendered annotation value %q, got %q", testBranchDevelopment, annotations["example.com/branch"])
+		}
+	})
+
+	t.Run("a malformed label template is reported with its key", func(t *testing.T) {
+		t.Parallel()
+		templated := jobCommitStatusWithValidTemplate("gate", "default", "my-ps")
+		templated.Spec.JobTemplate.Labels = map[string]string{"example.com/broken": "{{ .Not.AField"}
+
+		_, _, err := renderJobMetadataTemplates(templated, ps, testBranchDevelopment, jobNamespaceMetadata{})
+		if err == nil {
+			t.Fatal("expected an error for a malformed label template, got nil")
+		}
+		if !strings.Contains(err.Error(), "jobTemplate.metadata.labels") || !strings.Contains(err.Error(), "example.com/broken") {
+			t.Errorf("expected the error to name the field and key, got: %v", err)
+		}
+	})
+
+	t.Run("a malformed annotation template is reported with its key", func(t *testing.T) {
+		t.Parallel()
+		templated := jobCommitStatusWithValidTemplate("gate", "default", "my-ps")
+		templated.Spec.JobTemplate.Annotations = map[string]string{"example.com/broken": "{{ .Not.AField"}
+
+		_, _, err := renderJobMetadataTemplates(templated, ps, testBranchDevelopment, jobNamespaceMetadata{})
+		if err == nil {
+			t.Fatal("expected an error for a malformed annotation template, got nil")
+		}
+		if !strings.Contains(err.Error(), "jobTemplate.metadata.annotations") || !strings.Contains(err.Error(), "example.com/broken") {
+			t.Errorf("expected the error to name the field and key, got: %v", err)
+		}
+	})
+}
+
+var _ = Describe("JobCommitStatus Controller - Sample Manifest", func() {
+	// Reads the canonical doc sample directly from config/samples (not a testdata copy, so it can't
+	// silently drift from what ships), strict-unmarshals it (catches typos/unknown fields early
+	// go-yaml wouldn't), and Creates it against the real envtest API server to prove it actually
+	// passes CRD schema validation (required fields, patterns, enums) — not just that it parses.
+	It("deserializes and is accepted by the API server", func() {
+		data, err := os.ReadFile("../../config/samples/promoter_v1alpha1_jobcommitstatus.yaml")
+		Expect(err).NotTo(HaveOccurred())
+
+		var jcs promoterv1alpha1.JobCommitStatus
+		Expect(unmarshalYamlStrict(string(data), &jcs)).To(Succeed())
+
+		Expect(jcs.Spec.Key).To(Equal("eval-gate"))
+		Expect(jcs.Spec.PromotionStrategyRef.Name).To(Equal("promotionstrategy-sample"))
+		Expect(jcs.Spec.ReportOn).To(Equal("proposed"))
+		Expect(jcs.Spec.Success.When.Expression).ToNot(BeEmpty())
+		Expect(jcs.Spec.JobTemplate.Spec.Template.Spec.Containers).To(HaveLen(1))
+
+		jcs.Namespace = "default"
+		ctx := context.Background()
+		Expect(k8sClient.Create(ctx, &jcs)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, &jcs) }()
+	})
+})

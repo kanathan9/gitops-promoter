@@ -16,6 +16,7 @@ spec:
   proposedCommitStatuses:
     - key: revert-check          # GitCommitStatus (active target)
     - key: commit-format-check   # GitCommitStatus (proposed target)
+    - key: eval-gate             # JobCommitStatus.spec.key
 #    - key: healthy-lint
   environments:
     - branch: environment/development

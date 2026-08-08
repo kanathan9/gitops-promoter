@@ -47,18 +47,28 @@ type JobCommitStatusSpecApplyConfiguration struct {
 	// for post-promotion checks that re-validate the environment after a promotion has landed.
 	ReportOn *string `json:"reportOn,omitempty"`
 	// DescriptionTemplate is the human-readable commit status description shown in the SCM provider
-	// (GitHub, GitLab, etc.). Uses Go templates.
+	// (GitHub, GitLab, etc.). Uses Go templates (text/template plus Sprig functions, same engine as
+	// the other built-in gates).
 	//
-	// Template variables (mirrors WebRequestCommitStatus's promotionstrategy-context variable set):
+	// Template variables (mirrors WebRequestCommitStatus's promotionstrategy-context variable set).
+	// Fields are accessed by their Go struct names (capitalized), not JSON/YAML keys, since these are
+	// Go templates rendered directly against the Go objects — for example {{ .Job.Status.Succeeded }},
+	// not {{ .Job.status.succeeded }} (the latter is only valid in spec.success.when.expression, which
+	// evaluates a separate JSON-shaped copy of the Job; see JobCommitStatusWhenSpec):
 	// - {{ .Branch }}: the environment branch the Job was created for
-	// - {{ .PromotionStrategy }}: the full PromotionStrategy spec and status
-	// - {{ .JobCommitStatus }}: the full JobCommitStatus spec and status (snapshot from the previous reconcile)
+	// - {{ .PromotionStrategy }}: the full PromotionStrategy object (spec and status)
+	// - {{ .JobCommitStatus }}: the full JobCommitStatus object (snapshot from the start of this reconcile)
 	// - {{ .NamespaceMetadata.Labels }} / {{ .NamespaceMetadata.Annotations }}: labels/annotations of the namespace
-	// - {{ .Job }}: the full child Job object once it has finished (nil while the Job is still running),
-	// so the description can surface details such as {{ .Job.status.conditions }} or a container's
-	// termination message.
+	// - {{ .Job }}: the child Job once it has reached a terminal phase (success or failure); nil while
+	// still running, so the description can distinguish "no result yet" from "here's what happened"
+	// and surface details such as {{ .Job.Status.Conditions }} or a container's termination message.
 	//
-	// If not specified, defaults to empty string.
+	// If not specified (the default), the description is generated automatically from the Job's own
+	// terminal condition (or "Job <name> is running" while pending) — this is a reasonable default for
+	// most use cases, so DescriptionTemplate is only needed to customize the wording or surface extra
+	// detail from the Job. A template that fails to render is reported via a Warning event and the
+	// Ready condition; the automatic description is used for that reconcile so a broken template never
+	// blocks or changes a promotion decision.
 	DescriptionTemplate *string `json:"descriptionTemplate,omitempty"`
 	// Success defines how to decide success/failure from the finished child Job.
 	Success *JobCommitStatusSuccessSpecApplyConfiguration `json:"success,omitempty"`
@@ -68,11 +78,27 @@ type JobCommitStatusSpecApplyConfiguration struct {
 	// activeDeadlineSeconds   -> timeout
 	// ttlSecondsAfterFinished -> cleanup (a reasonable suggestion is 24h; not defaulted by the controller)
 	//
-	// Templating (Go templates, same variables as DescriptionTemplate) is supported ONLY in
-	// jobTemplate.metadata.labels and jobTemplate.metadata.annotations; the rest of the Job spec is used
-	// as-is. The controller also stamps promoter.argoproj.io/branch, promoter.argoproj.io/dry-sha, and
-	// promoter.argoproj.io/hydrated-sha labels onto the created Job (and, transitively, its Pods), so
-	// they're available to the running container via the downward API.
+	// Templating (Go templates, same variables as DescriptionTemplate, with Job always nil since the
+	// Job doesn't exist yet) is supported ONLY in the VALUES of jobTemplate.metadata.labels and
+	// jobTemplate.metadata.annotations — keys are never templated, and the rest of the Job spec
+	// (including jobTemplate.spec.template, the Pod template) is used as-is. A template value that
+	// fails to render fails Job creation for that environment (reported the same way as any other
+	// creation failure: a Warning event and the Ready condition; the standard rate-limited retry
+	// applies). Because a raw environment branch (e.g. "environment/production") contains "/" and is
+	// not a valid Kubernetes label value, sanitize it first if you use {{ .Branch }} in a label value,
+	// for example {{ .Branch | replace "/" "-" }}; annotation values have no such restriction.
+	//
+	// The controller also sets three reserved identity labels on every Job it creates, which jobTemplate
+	// must not set itself (rejected at admission-adjacent validation, reported via the Ready condition):
+	// promoter.argoproj.io/job-commit-status (this JobCommitStatus's name), promoter.argoproj.io/environment
+	// (the environment branch), and promoter.argoproj.io/hydrated-sha (the SHA the Job was created for).
+	// These identify which Job belongs to which environment/SHA; they are not intended as a stable
+	// integration point for user workloads.
+	//
+	// In addition, every container and init container in jobTemplate.spec.template.spec receives four
+	// plain (non-templated, pre-resolved) environment variables, appended to whatever the container
+	// already defines: PROMOTER_JOB_SHA, PROMOTER_JOB_BRANCH, PROMOTER_JOB_PROMOTION_STRATEGY, and
+	// PROMOTER_JOB_REPOSITORY.
 	JobTemplate *v1.JobTemplateSpec `json:"jobTemplate,omitempty"`
 }
 

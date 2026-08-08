@@ -63,6 +63,29 @@ const maxCommitStatusDescriptionLength = 140
 // jobName to sanitize the identity string into a DNS-safe stem.
 var nonAlphanumeric = regexp.MustCompile("[^a-zA-Z0-9]+")
 
+// jobNamespaceMetadata holds the labels and annotations of the JobCommitStatus's own namespace,
+// exposed to templates as NamespaceMetadata.Labels / NamespaceMetadata.Annotations. Mirrors
+// WebRequestCommitStatus's promotionstrategy-context variable set (see JobCommitStatusSpec doc).
+type jobNamespaceMetadata struct {
+	Labels      map[string]string
+	Annotations map[string]string
+}
+
+// jobTemplateData is the template binding for spec.descriptionTemplate and
+// spec.jobTemplate.metadata.labels/annotations. Job is nil for label/annotation templates (rendered
+// before the Job exists) and while descriptionTemplate is rendered for a still-running Job; it holds
+// the finished Job once terminal, so the description can surface details such as
+// {{ .Job.Status.Conditions }} or a container's termination message. Fields are accessed by their Go
+// struct names (this is a Go template rendered directly against the Go object), unlike
+// success.when.expression's JSON-shaped "Job.status.succeeded" (see evaluateSuccessExpression).
+type jobTemplateData struct {
+	PromotionStrategy *promoterv1alpha1.PromotionStrategy
+	JobCommitStatus   *promoterv1alpha1.JobCommitStatus
+	Job               *batchv1.Job
+	NamespaceMetadata jobNamespaceMetadata
+	Branch            string
+}
+
 // JobCommitStatusReconciler reconciles a JobCommitStatus object.
 //
 // For each environment the gate applies to (resolved from the referenced PromotionStrategy), the
@@ -99,6 +122,7 @@ type JobCommitStatusReconciler struct {
 // +kubebuilder:rbac:groups=promoter.argoproj.io,resources=commitstatuses,verbs=get;list;watch;patch;create;delete
 // +kubebuilder:rbac:groups=promoter.argoproj.io,resources=promotionstrategies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 
 // Reconcile loads the JobCommitStatus and its referenced PromotionStrategy, then for each
 // applicable environment: creates a Job for that environment's current SHA if one doesn't already
@@ -154,6 +178,13 @@ func (r *JobCommitStatusReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	parentLabelKey := utils.CommitStatusGateLabelKeyForParent(&jcs)
 	if err := validateNoReservedJobLabels(&jcs.Spec.JobTemplate, parentLabelKey); err != nil {
 		return ctrl.Result{}, fmt.Errorf("invalid spec.jobTemplate: %w", err)
+	}
+
+	// Namespace labels/annotations are exposed to descriptionTemplate and jobTemplate.metadata
+	// labels/annotations templates as NamespaceMetadata.
+	namespaceMeta, err := r.getNamespaceMetadata(ctx, jcs.Namespace)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to get namespace metadata: %w", err)
 	}
 
 	applicableEnvs := utils.GetApplicableEnvironments(&ps, jcs.Spec.Key, jcs.Spec.ReportOn)
@@ -217,7 +248,7 @@ func (r *JobCommitStatusReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 
 		var description string
-		job, ensureErr := r.ensureJobForEnvironment(ctx, &jcs, &ps, parentLabelKey, env.Branch, sha)
+		job, ensureErr := r.ensureJobForEnvironment(ctx, &jcs, &ps, parentLabelKey, env.Branch, sha, namespaceMeta)
 		if ensureErr != nil {
 			logger.Error(ensureErr, "failed to ensure Job for environment", "branch", env.Branch, "sha", sha)
 			r.Recorder.Eventf(&jcs, nil, "Warning", "JobCreateFailed", "Reconciling",
@@ -233,6 +264,12 @@ func (r *JobCommitStatusReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				envState.StartedAt = &startedAt
 			}
 			envState.Phase, envState.Reason, description, envState.FinishedAt = r.observeJob(ctx, &jcs, job, env.Branch)
+
+			var tmplErr error
+			description, tmplErr = r.applyDescriptionTemplate(ctx, &jcs, &ps, env.Branch, namespaceMeta, job, envState.Phase, description)
+			if tmplErr != nil {
+				jobErrs = append(jobErrs, tmplErr)
+			}
 		}
 
 		previousPhase := previousEnvByBranch[env.Branch].Phase
@@ -465,6 +502,60 @@ func (r *JobCommitStatusReconciler) evaluateSuccessExpression(expression string,
 	return result, nil
 }
 
+// applyDescriptionTemplate renders spec.descriptionTemplate, when set, to override autoDescription
+// (the description observeJob already computed from the Job's own condition). job is bound as
+// jobTemplateData.Job only once phase is terminal (see jobTemplateData doc); it's nil while still
+// running, so descriptionTemplate can distinguish "no result yet" from "here's what happened".
+//
+// A broken template is reported via a warning event and returned as an error (folded into the
+// caller's jobErrs, giving Ready=False and the standard retry) rather than corrupting the
+// already-computed phase/reason: a bad description shouldn't be able to block or flip a promotion
+// decision, only the retry/reporting of the description text itself — so autoDescription is
+// returned alongside the error as the description to use for this reconcile.
+func (r *JobCommitStatusReconciler) applyDescriptionTemplate(
+	ctx context.Context,
+	jcs *promoterv1alpha1.JobCommitStatus,
+	ps *promoterv1alpha1.PromotionStrategy,
+	branch string,
+	namespaceMeta jobNamespaceMetadata,
+	job *batchv1.Job,
+	phase promoterv1alpha1.CommitStatusPhase,
+	autoDescription string,
+) (description string, err error) {
+	if jcs.Spec.DescriptionTemplate == "" {
+		return autoDescription, nil
+	}
+
+	var jobForTemplate *batchv1.Job
+	if isTerminalCommitPhase(phase) {
+		jobForTemplate = job
+	}
+	rendered, tmplErr := utils.RenderStringTemplate(jcs.Spec.DescriptionTemplate, jobTemplateData{
+		Branch:            branch,
+		PromotionStrategy: ps,
+		JobCommitStatus:   jcs,
+		NamespaceMetadata: namespaceMeta,
+		Job:               jobForTemplate,
+	})
+	if tmplErr != nil {
+		log.FromContext(ctx).Error(tmplErr, "failed to render descriptionTemplate", "branch", branch)
+		r.Recorder.Eventf(jcs, nil, "Warning", "DescriptionTemplateError", "Reconciling",
+			"failed to render descriptionTemplate for environment %q: %v", branch, tmplErr)
+		return autoDescription, fmt.Errorf("environment %q: descriptionTemplate: %w", branch, tmplErr)
+	}
+	return rendered, nil
+}
+
+// getNamespaceMetadata fetches the JobCommitStatus's own namespace labels/annotations for use in
+// jobTemplateData. Called once per reconcile, not per environment.
+func (r *JobCommitStatusReconciler) getNamespaceMetadata(ctx context.Context, namespace string) (jobNamespaceMetadata, error) {
+	var ns corev1.Namespace
+	if err := r.Get(ctx, client.ObjectKey{Name: namespace}, &ns); err != nil {
+		return jobNamespaceMetadata{}, fmt.Errorf("failed to get namespace %q: %w", namespace, err)
+	}
+	return jobNamespaceMetadata{Labels: ns.Labels, Annotations: ns.Annotations}, nil
+}
+
 // isTerminalCommitPhase reports whether phase is a terminal outcome (success or failure) that,
 // once durably recorded for a given SHA, will never be recomputed for that same SHA again.
 func isTerminalCommitPhase(phase promoterv1alpha1.CommitStatusPhase) bool {
@@ -517,6 +608,7 @@ func (r *JobCommitStatusReconciler) ensureJobForEnvironment(
 	jcs *promoterv1alpha1.JobCommitStatus,
 	ps *promoterv1alpha1.PromotionStrategy,
 	parentLabelKey, branch, sha string,
+	namespaceMeta jobNamespaceMetadata,
 ) (*batchv1.Job, error) {
 	identityLabels := map[string]string{
 		parentLabelKey:                           utils.KubeSafeLabel(jcs.Name),
@@ -548,12 +640,17 @@ func (r *JobCommitStatusReconciler) ensureJobForEnvironment(
 		return &owned[0], nil
 	}
 
+	renderedLabels, renderedAnnotations, err := renderJobMetadataTemplates(jcs, ps, branch, namespaceMeta)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render jobTemplate metadata templates: %w", err)
+	}
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        jobName(jcs.Name, branch, sha),
 			Namespace:   jcs.Namespace,
-			Labels:      mergeStringMaps(jcs.Spec.JobTemplate.Labels, identityLabels),
-			Annotations: jcs.Spec.JobTemplate.Annotations,
+			Labels:      mergeStringMaps(renderedLabels, identityLabels),
+			Annotations: renderedAnnotations,
 			Finalizers:  []string{promoterv1alpha1.JobCommitStatusJobFinalizer},
 		},
 		Spec: *jcs.Spec.JobTemplate.Spec.DeepCopy(),
@@ -609,6 +706,52 @@ func injectPromoterJobEnv(podSpec *corev1.PodSpec, sha, branch, promotionStrateg
 	for i := range podSpec.InitContainers {
 		podSpec.InitContainers[i].Env = append(podSpec.InitContainers[i].Env, envVars...)
 	}
+}
+
+// renderJobMetadataTemplates renders each value in jobTemplate.metadata.labels/annotations as a Go
+// template (see JobCommitStatusSpec doc: templating is supported ONLY in these two fields; keys and
+// the rest of the Job spec are used verbatim). Job is always nil in the returned jobTemplateData:
+// this runs before the Job exists, at Job-creation time only.
+func renderJobMetadataTemplates(
+	jcs *promoterv1alpha1.JobCommitStatus,
+	ps *promoterv1alpha1.PromotionStrategy,
+	branch string,
+	namespaceMeta jobNamespaceMetadata,
+) (labels, annotations map[string]string, err error) {
+	data := jobTemplateData{
+		Branch:            branch,
+		PromotionStrategy: ps,
+		JobCommitStatus:   jcs,
+		NamespaceMetadata: namespaceMeta,
+	}
+
+	labels, err = renderStringMapTemplates(jcs.Spec.JobTemplate.Labels, data)
+	if err != nil {
+		return nil, nil, fmt.Errorf("jobTemplate.metadata.labels: %w", err)
+	}
+	annotations, err = renderStringMapTemplates(jcs.Spec.JobTemplate.Annotations, data)
+	if err != nil {
+		return nil, nil, fmt.Errorf("jobTemplate.metadata.annotations: %w", err)
+	}
+	return labels, annotations, nil
+}
+
+// renderStringMapTemplates renders each value in m as a Go template against data, preserving keys
+// verbatim. Returns nil (not an empty map) for a nil input, matching the zero-value semantics
+// callers already rely on (mergeStringMaps, ObjectMeta.Annotations).
+func renderStringMapTemplates(m map[string]string, data any) (map[string]string, error) {
+	if m == nil {
+		return nil, nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		rendered, err := utils.RenderStringTemplate(v, data)
+		if err != nil {
+			return nil, fmt.Errorf("key %q: %w", k, err)
+		}
+		out[k] = rendered
+	}
+	return out, nil
 }
 
 // mergeStringMaps returns a new map containing user's entries overlaid by reserved's entries.
