@@ -3,10 +3,10 @@ package git_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1041,8 +1041,47 @@ var _ = Describe("ActivePath support", func() {
 	})
 })
 
-var _ = Describe("Git subprocess proxy env", func() {
-	It("forwards proxy and TLS env vars via runCmd", func() {
+var _ = Describe("gitChildEnv", func() {
+	proxyEnvKeys := []string{
+		"HTTPS_PROXY", "https_proxy",
+		"HTTP_PROXY", "http_proxy",
+		"NO_PROXY", "no_proxy",
+		"GIT_SSL_CAINFO", "SSL_CERT_FILE",
+	}
+
+	clearProxyEnv := func() {
+		for _, key := range proxyEnvKeys {
+			GinkgoT().Setenv(key, "")
+		}
+	}
+
+	envMap := func(env []string) map[string]string {
+		got := make(map[string]string, len(env))
+		for _, entry := range env {
+			key, val, ok := strings.Cut(entry, "=")
+			Expect(ok).To(BeTrue(), "invalid env entry %q", entry)
+			got[key] = val
+		}
+		return got
+	}
+
+	It("includes auth vars and PATH and omits unset proxy keys", func() {
+		GinkgoT().Setenv("PATH", "/custom/bin")
+		clearProxyEnv()
+
+		got := envMap(git.GitChildEnv("alice", "s3cret", nil))
+		Expect(got["GIT_ASKPASS"]).To(Equal("promoter_askpass.sh"))
+		Expect(got["GIT_USERNAME"]).To(Equal("alice"))
+		Expect(got["GIT_PASSWORD"]).To(Equal("s3cret"))
+		Expect(got["PATH"]).To(Equal("/custom/bin"))
+		Expect(got["GIT_TERMINAL_PROMPT"]).To(Equal("0"))
+		for _, key := range proxyEnvKeys {
+			Expect(got).NotTo(HaveKey(key))
+		}
+	})
+
+	It("forwards proxy and TLS env vars", func() {
+		clearProxyEnv()
 		want := map[string]string{
 			"HTTPS_PROXY":    "http://proxy.test:8443",
 			"HTTP_PROXY":     "http://proxy.test:8080",
@@ -1054,53 +1093,217 @@ var _ = Describe("Git subprocess proxy env", func() {
 			GinkgoT().Setenv(key, val)
 		}
 
-		workDir := GinkgoT().TempDir()
-		envDump := filepath.Join(workDir, "proxy-env-dump")
-		gitBin := filepath.Join(workDir, "git")
-		script := fmt.Sprintf(`#!/bin/sh
-ENV_DUMP=%q
-if [ "$1" = "ls-remote" ] && [ "$2" = "--heads" ]; then
-  : > "$ENV_DUMP"
-  for key in HTTPS_PROXY HTTP_PROXY NO_PROXY GIT_SSL_CAINFO SSL_CERT_FILE; do
-    eval "val=\$$key"
-    echo "$key=$val" >> "$ENV_DUMP"
-  done
-  echo "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef	refs/heads/main"
-  exit 0
-fi
-echo "unexpected git args: $*" >&2
-exit 1
-`, envDump)
-		Expect(os.WriteFile(gitBin, []byte(script), 0o755)).To(Succeed())
-		GinkgoT().Setenv("PATH", workDir)
-
-		repo := &v1alpha1.GitRepository{
-			Spec: v1alpha1.GitRepositorySpec{
-				GitHub: &v1alpha1.GitHubRepo{Owner: "test-owner", Name: "testrepo"},
-				ScmProviderRef: v1alpha1.ScmProviderObjectReference{
-					Kind: "ScmProvider",
-					Name: "testprovider",
-				},
-			},
-			ObjectMeta: metav1.ObjectMeta{Name: "testrepo", Namespace: "default"},
-		}
-		gap := &fakeGitProvider{tempDirPath: filepath.Join(workDir, "ignored-repo")}
-
-		shas, err := git.LsRemote(context.Background(), gap, repo, "main")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(shas).To(HaveKeyWithValue("main", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"))
-
-		dump, err := os.ReadFile(envDump)
-		Expect(err).NotTo(HaveOccurred())
-		got := map[string]string{}
-		for line := range strings.SplitSeq(strings.TrimSpace(string(dump)), "\n") {
-			key, val, ok := strings.Cut(line, "=")
-			Expect(ok).To(BeTrue(), "unexpected dump line %q", line)
-			got[key] = val
-		}
+		got := envMap(git.GitChildEnv("user", "token", nil))
 		for key, val := range want {
 			Expect(got[key]).To(Equal(val), "proxy env var %s", key)
 		}
+	})
+
+	It("forwards lowercase proxy env vars", func() {
+		clearProxyEnv()
+		GinkgoT().Setenv("https_proxy", "http://lower-https:8443")
+		GinkgoT().Setenv("http_proxy", "http://lower-http:8080")
+		GinkgoT().Setenv("no_proxy", "example.internal")
+
+		got := envMap(git.GitChildEnv("user", "token", nil))
+		Expect(got["https_proxy"]).To(Equal("http://lower-https:8443"))
+		Expect(got["http_proxy"]).To(Equal("http://lower-http:8080"))
+		Expect(got["no_proxy"]).To(Equal("example.internal"))
+	})
+
+	It("appends extraEnv after auth vars", func() {
+		clearProxyEnv()
+		env := git.GitChildEnv("user", "token", []string{"GIT_INDEX_FILE=/tmp/index"})
+		Expect(env).To(ContainElement("GIT_INDEX_FILE=/tmp/index"))
+		Expect(slices.Index(env, "GIT_INDEX_FILE=/tmp/index")).To(BeNumerically(">", slices.Index(env, "GIT_ASKPASS=promoter_askpass.sh")))
+	})
+})
+
+// FindMatchingHydratorNote exercises adoption of hydrator git notes when the proposed branch tip
+// is an ours-merge commit with no note of its own. The fixture mirrors production-usw-next after
+// conflict resolution: first-parent history is
+//
+//	merge (no note) → hydrated@currentDry (note) → hydrated@staleDry (note) → …
+//
+// FindMatchingHydratorNote must return the note for currentDry (matching hydrator.metadata on the
+// tip), not the stale ancestor note.
+var _ = Describe("FindMatchingHydratorNote", func() {
+	var (
+		tempRepoDir string
+		workDir     string
+		g           *git.EnvironmentOperations
+		repo        *v1alpha1.GitRepository
+	)
+
+	BeforeEach(func() {
+		var err error
+		tempRepoDir, err = os.MkdirTemp("", "git-note-walk-*")
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = runGitCmd(tempRepoDir, "init", "--bare")
+		Expect(err).NotTo(HaveOccurred())
+
+		workDir, err = os.MkdirTemp("", "git-note-walk-work-*")
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = runGitCmd(workDir, "clone", tempRepoDir, ".")
+		Expect(err).NotTo(HaveOccurred())
+		for _, cfg := range [][]string{
+			{"config", "user.name", "Test User"},
+			{"config", "user.email", "test@example.com"},
+			{"config", "commit.gpgsign", "false"},
+		} {
+			_, err = runGitCmd(workDir, cfg...)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		repo = &v1alpha1.GitRepository{
+			ObjectMeta: metav1.ObjectMeta{Name: "testrepo", Namespace: "default"},
+			Spec: v1alpha1.GitRepositorySpec{
+				GitHub:         &v1alpha1.GitHubRepo{Owner: "test-owner", Name: "testrepo"},
+				ScmProviderRef: v1alpha1.ScmProviderObjectReference{Kind: "ScmProvider", Name: "testprovider"},
+			},
+		}
+		gap := &fakeGitProvider{tempDirPath: tempRepoDir}
+		g = git.NewEnvironmentOperations(repo, gap, "default/testrepo")
+		Expect(g.CloneRepo(GinkgoT().Context())).To(Succeed())
+	})
+
+	AfterEach(func() {
+		if workDir != "" {
+			_ = os.RemoveAll(workDir)
+		}
+		if tempRepoDir != "" {
+			_ = os.RemoveAll(tempRepoDir)
+		}
+	})
+
+	It("adopts a matching hydrator note from a first-parent ancestor after ours-merge", func() {
+		const currentDry = "0c9ff02a8f23a7bb85e92e0ab395af91c530f18c"
+		const staleDry = "f1b84ed4df293385f9904b6934d14e784762fecd"
+
+		By("bootstrapping active with a base hydrator.metadata commit")
+		Expect(os.WriteFile(filepath.Join(workDir, "hydrator.metadata"), []byte(`{"drySha":"base"}`), 0o644)).To(Succeed())
+		_, err := runGitCmd(workDir, "add", "hydrator.metadata")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = runGitCmd(workDir, "commit", "-m", "base")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = runGitCmd(workDir, "branch", "-M", "active")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = runGitCmd(workDir, "push", "-u", "origin", "active")
+		Expect(err).NotTo(HaveOccurred())
+
+		By("building proposed-next with two hydrated commits and distinct git notes")
+		_, err = runGitCmd(workDir, "checkout", "-b", "proposed-next")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(os.WriteFile(filepath.Join(workDir, "hydrator.metadata"), []byte(`{"drySha":"`+staleDry+`"}`), 0o644)).To(Succeed())
+		_, err = runGitCmd(workDir, "add", "hydrator.metadata")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = runGitCmd(workDir, "commit", "-m", "319fb00: older hydrated")
+		Expect(err).NotTo(HaveOccurred())
+		staleSha, err := runGitCmd(workDir, "rev-parse", "HEAD")
+		Expect(err).NotTo(HaveOccurred())
+		staleSha = strings.TrimSpace(staleSha)
+
+		Expect(os.WriteFile(filepath.Join(workDir, "hydrator.metadata"), []byte(`{"drySha":"`+currentDry+`"}`), 0o644)).To(Succeed())
+		_, err = runGitCmd(workDir, "add", "hydrator.metadata")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = runGitCmd(workDir, "commit", "-m", "0c9ff02: hydrated")
+		Expect(err).NotTo(HaveOccurred())
+		hydratedSha, err := runGitCmd(workDir, "rev-parse", "HEAD")
+		Expect(err).NotTo(HaveOccurred())
+		hydratedSha = strings.TrimSpace(hydratedSha)
+
+		_, err = runGitCmd(workDir, "notes", "--ref="+git.HydratorNotesRef, "add", "-f", "-m", `{"drySha":"`+staleDry+`"}`, staleSha)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = runGitCmd(workDir, "notes", "--ref="+git.HydratorNotesRef, "add", "-f", "-m", `{"drySha":"`+currentDry+`"}`, hydratedSha)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = runGitCmd(workDir, "push", "-u", "origin", "proposed-next")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = runGitCmd(workDir, "push", "origin", git.HydratorNotesRef+":"+git.HydratorNotesRef)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("advancing active so Promoter's ours-merge has something to merge")
+		_, err = runGitCmd(workDir, "checkout", "active")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(os.WriteFile(filepath.Join(workDir, "hydrator.metadata"), []byte(`{"drySha":"active-advanced"}`), 0o644)).To(Succeed())
+		_, err = runGitCmd(workDir, "add", "hydrator.metadata")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = runGitCmd(workDir, "commit", "-m", "active advance")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = runGitCmd(workDir, "push", "origin", "active")
+		Expect(err).NotTo(HaveOccurred())
+
+		By("running ours-merge on proposed-next; the merge commit has no hydrator note")
+		clonePath := g.ClonePath()
+		_, err = runGitCmd(clonePath, "fetch", "origin", "proposed-next", "active")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(g.FetchNotes(GinkgoT().Context())).To(Succeed())
+		Expect(g.MergeWithOursStrategy(GinkgoT().Context(), "proposed-next", "active")).To(Succeed())
+
+		_, err = runGitCmd(clonePath, "fetch", "origin", "proposed-next")
+		Expect(err).NotTo(HaveOccurred())
+		mergeSha, err := runGitCmd(clonePath, "rev-parse", "origin/proposed-next")
+		Expect(err).NotTo(HaveOccurred())
+		mergeSha = strings.TrimSpace(mergeSha)
+
+		directNote, err := g.GetHydratorNote(GinkgoT().Context(), mergeSha)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(directNote).To(BeNil())
+
+		By("walking first-parent ancestors for a note whose drySha matches hydrator.metadata on the tip")
+		note, err := g.FindMatchingHydratorNote(GinkgoT().Context(), mergeSha, currentDry, git.MaxHydratorNoteFirstParentWalk)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(note).NotTo(BeNil())
+		Expect(note.DrySha).To(Equal(currentDry))
+
+		By("returning nil when no ancestor note matches the expected dry SHA")
+		mismatch, err := g.FindMatchingHydratorNote(GinkgoT().Context(), mergeSha, "does-not-exist", git.MaxHydratorNoteFirstParentWalk)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(mismatch).To(BeNil())
+	})
+
+	It("returns a tip git note even when its drySha differs from expectedDrySha", func() {
+		const metadataDry = "0c9ff02a8f23a7bb85e92e0ab395af91c530f18c"
+		const noteDry = "f1b84ed4df293385f9904b6934d14e784762fecd"
+
+		_, err := runGitCmd(workDir, "checkout", "-b", "proposed-next")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(os.WriteFile(filepath.Join(workDir, "hydrator.metadata"), []byte(`{"drySha":"`+metadataDry+`"}`), 0o644)).To(Succeed())
+		_, err = runGitCmd(workDir, "add", "hydrator.metadata")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = runGitCmd(workDir, "commit", "-m", "hydrated")
+		Expect(err).NotTo(HaveOccurred())
+		hydratedSha, err := runGitCmd(workDir, "rev-parse", "HEAD")
+		Expect(err).NotTo(HaveOccurred())
+		hydratedSha = strings.TrimSpace(hydratedSha)
+		_, err = runGitCmd(workDir, "notes", "--ref="+git.HydratorNotesRef, "add", "-f", "-m", `{"drySha":"`+noteDry+`"}`, hydratedSha)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = runGitCmd(workDir, "push", "-u", "origin", "proposed-next")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = runGitCmd(workDir, "push", "origin", git.HydratorNotesRef+":"+git.HydratorNotesRef)
+		Expect(err).NotTo(HaveOccurred())
+
+		clonePath := g.ClonePath()
+		_, err = runGitCmd(clonePath, "fetch", "origin", "proposed-next")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(g.FetchNotes(GinkgoT().Context())).To(Succeed())
+		tipSha, err := runGitCmd(clonePath, "rev-parse", "origin/proposed-next")
+		Expect(err).NotTo(HaveOccurred())
+		tipSha = strings.TrimSpace(tipSha)
+
+		note, err := g.FindMatchingHydratorNote(GinkgoT().Context(), tipSha, metadataDry, git.MaxHydratorNoteFirstParentWalk)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(note).NotTo(BeNil())
+		Expect(note.DrySha).To(Equal(noteDry))
+	})
+})
+
+var _ = Describe("gitBin", func() {
+	It("is resolved to an existing executable at init", func() {
+		Expect(git.GitBin).NotTo(BeEmpty())
+		_, err := os.Stat(git.GitBin)
+		Expect(err).NotTo(HaveOccurred())
 	})
 })
 
