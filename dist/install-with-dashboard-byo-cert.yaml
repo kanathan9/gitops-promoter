@@ -16,7 +16,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: argocdcommitstatuses.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -334,7 +334,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: changetransferpolicies.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -559,6 +559,7 @@ spec:
                   dry:
                     description: Dry is the dry state of the branch, which is the
                       commit that is being proposed.
+                    nullable: true
                     properties:
                       author:
                         description: Author is the author of the commit
@@ -869,8 +870,11 @@ spec:
                     by the ChangeTransferPolicy.
                   properties:
                     active:
-                      description: Active is the state of the active branch at the
-                        time the PR was merged.
+                      description: |-
+                        Active is the state of the active branch at the time the PR was merged. Its dry state is read back from
+                        <activePath>/hydrator.metadata on the merge commit and its hydrated state from that commit itself, so both
+                        describe what actually merged regardless of merge style. Its commitStatuses, by contrast, come from the
+                        snapshot trailers and may be stale when mergeCommitSnapshotMismatch is true.
                       properties:
                         commitStatuses:
                           description: CommitStatuses is a list of commit statuses
@@ -914,6 +918,7 @@ spec:
                         dry:
                           description: Dry is the dry state of the branch, which is
                             the commit that is being proposed.
+                          nullable: true
                           properties:
                             author:
                               description: Author is the author of the commit
@@ -1159,6 +1164,15 @@ spec:
                               type: string
                           type: object
                       type: object
+                    mergeCommitSnapshotMismatch:
+                      description: |-
+                        MergeCommitSnapshotMismatch indicates hydrator metadata on the SCM-reported merge commit disagreed with
+                        the promoter's last snapshot (typically an external merge after the proposed branch advanced). When true,
+                        the fields this entry rebuilds from the snapshot trailers — proposed.commitStatuses and
+                        active.commitStatuses, plus proposed.hydrated when the merge was a squash (a single-parent squash commit
+                        gives the controller nothing to reconstruct the hydrated sha from) — may describe the earlier proposed
+                        revision rather than what actually merged.
+                      type: boolean
                     proposed:
                       description: Proposed is the state of the proposed branch at
                         the time the PR was merged.
@@ -1166,7 +1180,9 @@ spec:
                         commitStatuses:
                           description: |-
                             CommitStatuses is a list of commit statuses that were being monitored for this branch.
-                            This contains the state frozen at the moment the PR was merged.
+                            This contains the state frozen at the moment the PR was merged. When the entry's
+                            mergeCommitSnapshotMismatch is true, these phases come from snapshot trailers describing the proposed
+                            revision the promoter last saw, which is not necessarily the revision that merged.
                           items:
                             description: ChangeRequestPolicyCommitStatusPhase defines
                               the phase of a commit status in a ChangeTransferPolicy.
@@ -1201,8 +1217,11 @@ spec:
                             type: object
                           type: array
                         hydrated:
-                          description: Hydrated is the hydrated state of the branch,
-                            which is the commit that is currently being worked on.
+                          description: |-
+                            Hydrated is the hydrated state of the branch, which is the commit that is currently being worked on.
+                            Read from the snapshot trailers. On a regular merge it is corrected to the merge commit's second parent,
+                            but a squash commit has only one parent, so when the entry's mergeCommitSnapshotMismatch is true and the
+                            merge was a squash the stale snapshot value is kept.
                           properties:
                             author:
                               description: Author is the author of the commit
@@ -1290,16 +1309,27 @@ spec:
                       properties:
                         externallyMergedOrClosed:
                           description: |-
-                            ExternallyMergedOrClosed indicates that the pull request is no longer open on the SCM while the
-                            PullRequest still desired it open: merged or closed outside the controller, or closed on the SCM
-                            because the PullRequest resource was deleted (finalizer) before this status was reconciled.
-                            When true, the State field will be empty ("") since we cannot tell merge vs. close from the provider.
-                            This status is preserved even after the PullRequest resource is deleted, maintaining a historical
-                            record until a new pull request is created for this environment.
+                            ExternallyMergedOrClosed indicated that the pull request was no longer open on the SCM while
+                            promotion still desired it open. The PullRequest controller no longer sets this field.
+
+                            Deprecated: Use status.state merged-or-closed or unknown instead. Existing values may still
+                            appear when mirrored from older PullRequest status. This field may be removed in a future API
+                            revision.
                           type: boolean
                         id:
                           description: ID is the unique identifier of the pull request,
                             set by the SCM.
+                          type: string
+                        mergedTargetSha:
+                          description: |-
+                            MergedTargetSha is the SHA that the target branch points at after the merge. It is a merge commit
+                            only when the SCM created one; squash and fast-forward merges report the resulting commit on the
+                            target branch instead. In the live pull request status it is mirrored from the PullRequest resource
+                            and is empty until the merge is observed; in a History entry it is the active-branch commit the
+                            entry describes.
+                          maxLength: 64
+                          minLength: 40
+                          pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
                           type: string
                         prCreationTime:
                           description: PRCreationTime is the time when the pull request
@@ -1320,6 +1350,8 @@ spec:
                           - closed
                           - merged
                           - open
+                          - merged-or-closed
+                          - unknown
                           type: string
                         url:
                           description: Url is the URL of the pull request.
@@ -1393,6 +1425,7 @@ spec:
                   dry:
                     description: Dry is the dry state of the branch, which is the
                       commit that is being proposed.
+                    nullable: true
                     properties:
                       author:
                         description: Author is the author of the commit
@@ -1636,16 +1669,27 @@ spec:
                 properties:
                   externallyMergedOrClosed:
                     description: |-
-                      ExternallyMergedOrClosed indicates that the pull request is no longer open on the SCM while the
-                      PullRequest still desired it open: merged or closed outside the controller, or closed on the SCM
-                      because the PullRequest resource was deleted (finalizer) before this status was reconciled.
-                      When true, the State field will be empty ("") since we cannot tell merge vs. close from the provider.
-                      This status is preserved even after the PullRequest resource is deleted, maintaining a historical
-                      record until a new pull request is created for this environment.
+                      ExternallyMergedOrClosed indicated that the pull request was no longer open on the SCM while
+                      promotion still desired it open. The PullRequest controller no longer sets this field.
+
+                      Deprecated: Use status.state merged-or-closed or unknown instead. Existing values may still
+                      appear when mirrored from older PullRequest status. This field may be removed in a future API
+                      revision.
                     type: boolean
                   id:
                     description: ID is the unique identifier of the pull request,
                       set by the SCM.
+                    type: string
+                  mergedTargetSha:
+                    description: |-
+                      MergedTargetSha is the SHA that the target branch points at after the merge. It is a merge commit
+                      only when the SCM created one; squash and fast-forward merges report the resulting commit on the
+                      target branch instead. In the live pull request status it is mirrored from the PullRequest resource
+                      and is empty until the merge is observed; in a History entry it is the active-branch commit the
+                      entry describes.
+                    maxLength: 64
+                    minLength: 40
+                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
                     type: string
                   prCreationTime:
                     description: PRCreationTime is the time when the pull request
@@ -1666,6 +1710,8 @@ spec:
                     - closed
                     - merged
                     - open
+                    - merged-or-closed
+                    - unknown
                     type: string
                   url:
                     description: Url is the URL of the pull request.
@@ -1686,7 +1732,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: clusterscmproviders.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -1851,8 +1897,8 @@ spec:
             x-kubernetes-validations:
             - message: exactly one of the fields in [github gitlab forgejo gitea bitbucketCloud
                 azureDevOps fake] must be set
-              rule: '[has(self.github),has(self.gitlab),has(self.forgejo),has(self.gitea),has(self.bitbucketCloud),has(self.azureDevOps),has(self.fake)].filter(x,x==true).size()
-                == 1'
+              rule: (has(self.github)?1:0)+(has(self.gitlab)?1:0)+(has(self.forgejo)?1:0)+(has(self.gitea)?1:0)+(has(self.bitbucketCloud)?1:0)+(has(self.azureDevOps)?1:0)+(has(self.fake)?1:0)
+                == 1
           status:
             description: ScmProviderStatus defines the observed state of ScmProvider
             properties:
@@ -1945,7 +1991,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: commitstatuses.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -2171,7 +2217,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: controllerconfigurations.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -2406,20 +2452,20 @@ spec:
                               x-kubernetes-validations:
                               - message: at most one of the fields in [fastSlow exponentialFailure
                                   bucket] may be set
-                                rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                                  <= 1'
+                                rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                                  <= 1
                             maxItems: 3
                             type: array
                         type: object
                         x-kubernetes-validations:
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket maxOf] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)+(has(self.maxOf)?1:0)
+                            <= 1
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                            <= 1
                       requeueDuration:
                         description: |-
                           RequeueDuration specifies how frequently resources should be requeued for automatic reconciliation.
@@ -2616,20 +2662,20 @@ spec:
                               x-kubernetes-validations:
                               - message: at most one of the fields in [fastSlow exponentialFailure
                                   bucket] may be set
-                                rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                                  <= 1'
+                                rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                                  <= 1
                             maxItems: 3
                             type: array
                         type: object
                         x-kubernetes-validations:
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket maxOf] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)+(has(self.maxOf)?1:0)
+                            <= 1
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                            <= 1
                       requeueDuration:
                         description: |-
                           RequeueDuration specifies how frequently resources should be requeued for automatic reconciliation.
@@ -2825,20 +2871,20 @@ spec:
                               x-kubernetes-validations:
                               - message: at most one of the fields in [fastSlow exponentialFailure
                                   bucket] may be set
-                                rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                                  <= 1'
+                                rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                                  <= 1
                             maxItems: 3
                             type: array
                         type: object
                         x-kubernetes-validations:
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket maxOf] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)+(has(self.maxOf)?1:0)
+                            <= 1
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                            <= 1
                       requeueDuration:
                         description: |-
                           RequeueDuration specifies how frequently resources should be requeued for automatic reconciliation.
@@ -3034,20 +3080,20 @@ spec:
                               x-kubernetes-validations:
                               - message: at most one of the fields in [fastSlow exponentialFailure
                                   bucket] may be set
-                                rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                                  <= 1'
+                                rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                                  <= 1
                             maxItems: 3
                             type: array
                         type: object
                         x-kubernetes-validations:
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket maxOf] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)+(has(self.maxOf)?1:0)
+                            <= 1
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                            <= 1
                       requeueDuration:
                         description: |-
                           RequeueDuration specifies how frequently resources should be requeued for automatic reconciliation.
@@ -3464,20 +3510,20 @@ spec:
                               x-kubernetes-validations:
                               - message: at most one of the fields in [fastSlow exponentialFailure
                                   bucket] may be set
-                                rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                                  <= 1'
+                                rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                                  <= 1
                             maxItems: 3
                             type: array
                         type: object
                         x-kubernetes-validations:
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket maxOf] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)+(has(self.maxOf)?1:0)
+                            <= 1
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                            <= 1
                       requeueDuration:
                         description: |-
                           RequeueDuration specifies how frequently resources should be requeued for automatic reconciliation.
@@ -3692,20 +3738,20 @@ spec:
                               x-kubernetes-validations:
                               - message: at most one of the fields in [fastSlow exponentialFailure
                                   bucket] may be set
-                                rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                                  <= 1'
+                                rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                                  <= 1
                             maxItems: 3
                             type: array
                         type: object
                         x-kubernetes-validations:
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket maxOf] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)+(has(self.maxOf)?1:0)
+                            <= 1
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                            <= 1
                       requeueDuration:
                         description: |-
                           RequeueDuration specifies how frequently resources should be requeued for automatic reconciliation.
@@ -3902,20 +3948,20 @@ spec:
                               x-kubernetes-validations:
                               - message: at most one of the fields in [fastSlow exponentialFailure
                                   bucket] may be set
-                                rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                                  <= 1'
+                                rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                                  <= 1
                             maxItems: 3
                             type: array
                         type: object
                         x-kubernetes-validations:
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket maxOf] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)+(has(self.maxOf)?1:0)
+                            <= 1
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                            <= 1
                       requeueDuration:
                         description: |-
                           RequeueDuration specifies how frequently resources should be requeued for automatic reconciliation.
@@ -4111,20 +4157,20 @@ spec:
                               x-kubernetes-validations:
                               - message: at most one of the fields in [fastSlow exponentialFailure
                                   bucket] may be set
-                                rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                                  <= 1'
+                                rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                                  <= 1
                             maxItems: 3
                             type: array
                         type: object
                         x-kubernetes-validations:
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket maxOf] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)+(has(self.maxOf)?1:0)
+                            <= 1
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                            <= 1
                       requeueDuration:
                         description: |-
                           RequeueDuration specifies how frequently resources should be requeued for automatic reconciliation.
@@ -4320,20 +4366,20 @@ spec:
                               x-kubernetes-validations:
                               - message: at most one of the fields in [fastSlow exponentialFailure
                                   bucket] may be set
-                                rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                                  <= 1'
+                                rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                                  <= 1
                             maxItems: 3
                             type: array
                         type: object
                         x-kubernetes-validations:
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket maxOf] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket),has(self.maxOf)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)+(has(self.maxOf)?1:0)
+                            <= 1
                         - message: at most one of the fields in [fastSlow exponentialFailure
                             bucket] may be set
-                          rule: '[has(self.fastSlow),has(self.exponentialFailure),has(self.bucket)].filter(x,x==true).size()
-                            <= 1'
+                          rule: (has(self.fastSlow)?1:0)+(has(self.exponentialFailure)?1:0)+(has(self.bucket)?1:0)
+                            <= 1
                       requeueDuration:
                         description: |-
                           RequeueDuration specifies how frequently resources should be requeued for automatic reconciliation.
@@ -4453,7 +4499,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: gitcommitstatuses.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -4783,7 +4829,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: gitrepositories.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -4986,8 +5032,8 @@ spec:
             x-kubernetes-validations:
             - message: exactly one of the fields in [github gitlab forgejo gitea bitbucketCloud
                 azureDevOps fake] must be set
-              rule: '[has(self.github),has(self.gitlab),has(self.forgejo),has(self.gitea),has(self.bitbucketCloud),has(self.azureDevOps),has(self.fake)].filter(x,x==true).size()
-                == 1'
+              rule: (has(self.github)?1:0)+(has(self.gitlab)?1:0)+(has(self.forgejo)?1:0)+(has(self.gitea)?1:0)+(has(self.bitbucketCloud)?1:0)+(has(self.azureDevOps)?1:0)+(has(self.fake)?1:0)
+                == 1
           status:
             description: GitRepositoryStatus defines the observed state of GitRepository
             properties:
@@ -5080,7 +5126,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: jobcommitstatuses.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -14491,7 +14537,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: promotionstrategies.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -14838,6 +14884,7 @@ spec:
                         dry:
                           description: Dry is the dry state of the branch, which is
                             the commit that is being proposed.
+                          nullable: true
                           properties:
                             author:
                               description: Author is the author of the commit
@@ -15100,8 +15147,11 @@ spec:
                           promoted by the ChangeTransferPolicy.
                         properties:
                           active:
-                            description: Active is the state of the active branch
-                              at the time the PR was merged.
+                            description: |-
+                              Active is the state of the active branch at the time the PR was merged. Its dry state is read back from
+                              <activePath>/hydrator.metadata on the merge commit and its hydrated state from that commit itself, so both
+                              describe what actually merged regardless of merge style. Its commitStatuses, by contrast, come from the
+                              snapshot trailers and may be stale when mergeCommitSnapshotMismatch is true.
                             properties:
                               commitStatuses:
                                 description: CommitStatuses is a list of commit statuses
@@ -15146,6 +15196,7 @@ spec:
                               dry:
                                 description: Dry is the dry state of the branch, which
                                   is the commit that is being proposed.
+                                nullable: true
                                 properties:
                                   author:
                                     description: Author is the author of the commit
@@ -15407,6 +15458,15 @@ spec:
                                     type: string
                                 type: object
                             type: object
+                          mergeCommitSnapshotMismatch:
+                            description: |-
+                              MergeCommitSnapshotMismatch indicates hydrator metadata on the SCM-reported merge commit disagreed with
+                              the promoter's last snapshot (typically an external merge after the proposed branch advanced). When true,
+                              the fields this entry rebuilds from the snapshot trailers — proposed.commitStatuses and
+                              active.commitStatuses, plus proposed.hydrated when the merge was a squash (a single-parent squash commit
+                              gives the controller nothing to reconstruct the hydrated sha from) — may describe the earlier proposed
+                              revision rather than what actually merged.
+                            type: boolean
                           proposed:
                             description: Proposed is the state of the proposed branch
                               at the time the PR was merged.
@@ -15414,7 +15474,9 @@ spec:
                               commitStatuses:
                                 description: |-
                                   CommitStatuses is a list of commit statuses that were being monitored for this branch.
-                                  This contains the state frozen at the moment the PR was merged.
+                                  This contains the state frozen at the moment the PR was merged. When the entry's
+                                  mergeCommitSnapshotMismatch is true, these phases come from snapshot trailers describing the proposed
+                                  revision the promoter last saw, which is not necessarily the revision that merged.
                                 items:
                                   description: ChangeRequestPolicyCommitStatusPhase
                                     defines the phase of a commit status in a ChangeTransferPolicy.
@@ -15450,9 +15512,11 @@ spec:
                                   type: object
                                 type: array
                               hydrated:
-                                description: Hydrated is the hydrated state of the
-                                  branch, which is the commit that is currently being
-                                  worked on.
+                                description: |-
+                                  Hydrated is the hydrated state of the branch, which is the commit that is currently being worked on.
+                                  Read from the snapshot trailers. On a regular merge it is corrected to the merge commit's second parent,
+                                  but a squash commit has only one parent, so when the entry's mergeCommitSnapshotMismatch is true and the
+                                  merge was a squash the stale snapshot value is kept.
                                 properties:
                                   author:
                                     description: Author is the author of the commit
@@ -15545,16 +15609,27 @@ spec:
                             properties:
                               externallyMergedOrClosed:
                                 description: |-
-                                  ExternallyMergedOrClosed indicates that the pull request is no longer open on the SCM while the
-                                  PullRequest still desired it open: merged or closed outside the controller, or closed on the SCM
-                                  because the PullRequest resource was deleted (finalizer) before this status was reconciled.
-                                  When true, the State field will be empty ("") since we cannot tell merge vs. close from the provider.
-                                  This status is preserved even after the PullRequest resource is deleted, maintaining a historical
-                                  record until a new pull request is created for this environment.
+                                  ExternallyMergedOrClosed indicated that the pull request was no longer open on the SCM while
+                                  promotion still desired it open. The PullRequest controller no longer sets this field.
+
+                                  Deprecated: Use status.state merged-or-closed or unknown instead. Existing values may still
+                                  appear when mirrored from older PullRequest status. This field may be removed in a future API
+                                  revision.
                                 type: boolean
                               id:
                                 description: ID is the unique identifier of the pull
                                   request, set by the SCM.
+                                type: string
+                              mergedTargetSha:
+                                description: |-
+                                  MergedTargetSha is the SHA that the target branch points at after the merge. It is a merge commit
+                                  only when the SCM created one; squash and fast-forward merges report the resulting commit on the
+                                  target branch instead. In the live pull request status it is mirrored from the PullRequest resource
+                                  and is empty until the merge is observed; in a History entry it is the active-branch commit the
+                                  entry describes.
+                                maxLength: 64
+                                minLength: 40
+                                pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
                                 type: string
                               prCreationTime:
                                 description: PRCreationTime is the time when the pull
@@ -15575,6 +15650,8 @@ spec:
                                 - closed
                                 - merged
                                 - open
+                                - merged-or-closed
+                                - unknown
                                 type: string
                               url:
                                 description: Url is the URL of the pull request.
@@ -15656,6 +15733,7 @@ spec:
                         dry:
                           description: Dry is the dry state of the branch, which is
                             the commit that is being proposed.
+                          nullable: true
                           properties:
                             author:
                               description: Author is the author of the commit
@@ -15907,16 +15985,27 @@ spec:
                       properties:
                         externallyMergedOrClosed:
                           description: |-
-                            ExternallyMergedOrClosed indicates that the pull request is no longer open on the SCM while the
-                            PullRequest still desired it open: merged or closed outside the controller, or closed on the SCM
-                            because the PullRequest resource was deleted (finalizer) before this status was reconciled.
-                            When true, the State field will be empty ("") since we cannot tell merge vs. close from the provider.
-                            This status is preserved even after the PullRequest resource is deleted, maintaining a historical
-                            record until a new pull request is created for this environment.
+                            ExternallyMergedOrClosed indicated that the pull request was no longer open on the SCM while
+                            promotion still desired it open. The PullRequest controller no longer sets this field.
+
+                            Deprecated: Use status.state merged-or-closed or unknown instead. Existing values may still
+                            appear when mirrored from older PullRequest status. This field may be removed in a future API
+                            revision.
                           type: boolean
                         id:
                           description: ID is the unique identifier of the pull request,
                             set by the SCM.
+                          type: string
+                        mergedTargetSha:
+                          description: |-
+                            MergedTargetSha is the SHA that the target branch points at after the merge. It is a merge commit
+                            only when the SCM created one; squash and fast-forward merges report the resulting commit on the
+                            target branch instead. In the live pull request status it is mirrored from the PullRequest resource
+                            and is empty until the merge is observed; in a History entry it is the active-branch commit the
+                            entry describes.
+                          maxLength: 64
+                          minLength: 40
+                          pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
                           type: string
                         prCreationTime:
                           description: PRCreationTime is the time when the pull request
@@ -15937,6 +16026,8 @@ spec:
                           - closed
                           - merged
                           - open
+                          - merged-or-closed
+                          - unknown
                           type: string
                         url:
                           description: Url is the URL of the pull request.
@@ -15987,7 +16078,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: pullrequests.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -16023,7 +16114,12 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: PullRequest is the Schema for the pullrequests API
+        description: |-
+          PullRequest is the Schema for the pullrequests API
+          Once recorded, the SHA can be neither replaced nor cleared: a resource merges at most once, so any
+          later disagreement is provider inconsistency or a status write built from a stale informer read, and
+          honoring it would strand the promotion history note already written against the original SHA. Such a
+          write is rejected rather than merged, which surfaces as a failed status apply and a retry.
         externalDocs:
           description: CRD reference (examples and behavior)
           url: https://gitops-promoter.readthedocs.io/en/stable/crd-specs/#pullrequest
@@ -16228,13 +16324,11 @@ spec:
                 x-kubernetes-list-type: map
               externallyMergedOrClosed:
                 description: |-
-                  ExternallyMergedOrClosed indicates that the pull request is no longer open on the SCM while the
-                  resource still desired it open (spec.state is "open"): either it was merged or closed outside the
-                  controller, or it was closed on the SCM because the PullRequest resource was deleted (finalizer)
-                  and a subsequent sync observed it missing. The controller does not distinguish those cases here.
-                  When true, the State field will be empty ("") since we cannot tell merge vs. close from the provider.
-                  The PullRequest resource will be deleted after this flag is set when possible, but the status is
-                  preserved in the owning ChangeTransferPolicy to maintain a record.
+                  ExternallyMergedOrClosed indicated that the pull request was no longer open on the SCM while the
+                  resource still desired it open. The PullRequest controller no longer sets this field.
+
+                  Deprecated: Use status.state merged-or-closed or unknown instead. Existing values are preserved
+                  when copied to ChangeTransferPolicy status. This field may be removed in a future API revision.
                 type: boolean
               id:
                 description: ID the id of the pull request
@@ -16247,6 +16341,20 @@ spec:
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$
+                type: string
+              mergedTargetSha:
+                description: |-
+                  MergedTargetSha is the SHA that spec.targetBranch points at after the merge, as reported by
+                  the SCM. It is a merge commit only when the SCM created one; squash and fast-forward merges
+                  report the resulting commit on the target branch instead.
+                  Set once by the PullRequest controller, either from the merge response for providers that
+                  report the SHA there, or from a Get-by-ID lookup when FindOpen no longer finds the PR
+                  (external merges, and providers whose merge response omits the SHA). The value is write-once:
+                  a resource merges at most once, so the controller never replaces a non-empty value, even if a
+                  provider later reports a different SHA.
+                maxLength: 64
+                minLength: 40
+                pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
                 type: string
               observedGeneration:
                 description: |-
@@ -16272,6 +16380,8 @@ spec:
                 - closed
                 - merged
                 - open
+                - merged-or-closed
+                - unknown
                 type: string
               url:
                 description: Url is the URL of the pull request.
@@ -16287,6 +16397,23 @@ spec:
             is empty
           rule: self.spec.state == 'open' || has(self.status.id) && self.status.id
             != ""
+        - message: mergedTargetSha may only be set when status.state is merged
+          rule: '!has(self.status) || !has(self.status.mergedTargetSha) || (has(self.status.state)
+            && self.status.state == ''merged'')'
+        - message: mergedTargetSha may not be set when status.state is merged-or-closed
+            or unknown
+          rule: '!has(self.status) || !has(self.status.state) || self.status.state
+            != ''merged-or-closed'' && self.status.state != ''unknown'' || !has(self.status.mergedTargetSha)'
+        - message: mergedTargetSha is immutable once set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.mergedTargetSha) || (has(self.status)
+            && has(self.status.mergedTargetSha) && self.status.mergedTargetSha ==
+            oldSelf.status.mergedTargetSha)'
+        - message: spec is immutable once status.state is merged, closed, or merged-or-closed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.state) || !(oldSelf.status.state
+            in [''merged'', ''closed'', ''merged-or-closed'']) || self.spec == oldSelf.spec'
+        - message: status.state is immutable once merged, closed, or unknown
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.state) || !(oldSelf.status.state
+            in [''merged'', ''closed'', ''unknown'']) || self.status.state == oldSelf.status.state'
     served: true
     storage: true
     subresources:
@@ -16296,7 +16423,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: revertcommits.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -16350,7 +16477,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: scheduledcommitstatuses.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -16802,7 +16929,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: scmproviders.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -16966,8 +17093,8 @@ spec:
             x-kubernetes-validations:
             - message: exactly one of the fields in [github gitlab forgejo gitea bitbucketCloud
                 azureDevOps fake] must be set
-              rule: '[has(self.github),has(self.gitlab),has(self.forgejo),has(self.gitea),has(self.bitbucketCloud),has(self.azureDevOps),has(self.fake)].filter(x,x==true).size()
-                == 1'
+              rule: (has(self.github)?1:0)+(has(self.gitlab)?1:0)+(has(self.forgejo)?1:0)+(has(self.gitea)?1:0)+(has(self.bitbucketCloud)?1:0)+(has(self.azureDevOps)?1:0)+(has(self.fake)?1:0)
+                == 1
           status:
             description: ScmProviderStatus defines the observed state of ScmProvider
             properties:
@@ -17060,7 +17187,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: timedcommitstatuses.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -17300,7 +17427,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: webrequestcommitstatuses.promoter.argoproj.io
 spec:
   group: promoter.argoproj.io
@@ -17537,8 +17664,8 @@ spec:
                     x-kubernetes-validations:
                     - message: at most one of the fields in [basic bearer oauth2 tls
                         scm] may be set
-                      rule: '[has(self.basic),has(self.bearer),has(self.oauth2),has(self.tls),has(self.scm)].filter(x,x==true).size()
-                        <= 1'
+                      rule: (has(self.basic)?1:0)+(has(self.bearer)?1:0)+(has(self.oauth2)?1:0)+(has(self.tls)?1:0)+(has(self.scm)?1:0)
+                        <= 1
                   bodyTemplate:
                     description: |-
                       BodyTemplate is the request body to send.
@@ -17756,8 +17883,7 @@ spec:
                 x-kubernetes-validations:
                 - message: exactly one of the fields in [polling trigger] must be
                     set
-                  rule: '[has(self.polling),has(self.trigger)].filter(x,x==true).size()
-                    == 1'
+                  rule: (has(self.polling)?1:0)+(has(self.trigger)?1:0) == 1
               promotionStrategyRef:
                 description: |-
                   PromotionStrategyRef references the PromotionStrategy this applies to.
@@ -19501,10 +19627,53 @@ spec:
       requeueDuration: 5m
   pullRequest:
     template:
-      description: This PR is promoting {{ with .ChangeTransferPolicy.Spec.ActivePath
-        }}`{{ . }}` on {{ end }}the environment branch `{{ .ChangeTransferPolicy.Spec.ActiveBranch
-        }}` from dry sha {{ .ChangeTransferPolicy.Status.Active.Dry.Sha }} to {{ .ChangeTransferPolicy.Status.Proposed.Dry.Sha
-        }}.
+      description: |
+        This PR promotes changes to **`{{ .ChangeTransferPolicy.Spec.ActiveBranch }}`**{{ if .PromotionStrategy }} (PromotionStrategy `{{ .PromotionStrategy.Name }}`){{ end }}.
+
+        ### Deployment commit
+
+        | | Active (deployed) | Proposed |
+        |---|---|---|
+        | SHA | {{ with .ChangeTransferPolicy.Status.Active.Dry }}{{ if and .RepoURL .Sha }}[{{ trunc 7 .Sha }}]({{ trimSuffix "/" .RepoURL }}/commit/{{ .Sha }}){{ else }}{{ trunc 7 .Sha }}{{ end }}{{ end }} | {{ with .ChangeTransferPolicy.Status.Proposed.Dry }}{{ if and .RepoURL .Sha }}[{{ trunc 7 .Sha }}]({{ trimSuffix "/" .RepoURL }}/commit/{{ .Sha }}){{ else }}{{ trunc 7 .Sha }}{{ end }}{{ end }} |
+        | Subject | {{ replace "|" "\\|" .ChangeTransferPolicy.Status.Active.Dry.Subject }} | {{ replace "|" "\\|" .ChangeTransferPolicy.Status.Proposed.Dry.Subject }} |
+
+        {{- $repo := "" -}}
+        {{- $base := "" -}}
+        {{- $head := "" -}}
+        {{- $activeSubject := "" -}}
+        {{- $proposedSubject := "" -}}
+        {{- with .ChangeTransferPolicy.Status.Active.Dry.References }}{{- with index . 0 }}{{- with .Commit -}}
+        {{- $base = .Sha -}}{{- $activeSubject = .Subject -}}{{- if .RepoURL -}}{{- $repo = .RepoURL -}}{{- end -}}
+        {{- end -}}{{- end -}}{{- end -}}
+        {{- with .ChangeTransferPolicy.Status.Proposed.Dry.References }}{{- with index . 0 }}{{- with .Commit -}}
+        {{- $head = .Sha -}}{{- $proposedSubject = .Subject -}}{{- if and (not $repo) .RepoURL -}}{{- $repo = .RepoURL -}}{{- end -}}
+        {{- end -}}{{- end -}}{{- end -}}
+        {{- if or $base $head }}
+
+        ### Code reference
+        {{- if $base }}
+        **Active:** {{ if and $repo $base }}[{{ trunc 7 $base }}]({{ trimSuffix "/" $repo }}/commit/{{ $base }}){{ else }}{{ trunc 7 $base }}{{ end }} — {{ $activeSubject }}
+        {{- end }}
+        {{- if $head }}
+        **Proposed:** {{ if and $repo $head }}[{{ trunc 7 $head }}]({{ trimSuffix "/" $repo }}/commit/{{ $head }}){{ else }}{{ trunc 7 $head }}{{ end }} — {{ $proposedSubject }}
+        {{- end }}
+        {{- if and $repo $base $head }}
+        **Diff:** [{{ trunc 7 $base }}...{{ trunc 7 $head }}]({{ trimSuffix "/" $repo }}/compare/{{ $base }}...{{ $head }})
+        {{- end }}
+        {{- end }}
+
+        {{- with .PromotionStrategy }}
+        {{- if .Status.Environments }}
+
+        ### Promotion pipeline
+
+        | Environment | Active dry | Proposed dry | PR |
+        |---|---|---|---|
+        {{- range .Status.Environments }}
+        | `{{ .Branch }}`{{ if eq .Branch $.ChangeTransferPolicy.Spec.ActiveBranch }} **(this PR)**{{ end }} | {{ trunc 7 .Active.Dry.Sha }} | {{ trunc 7 .Proposed.Dry.Sha }} | {{ with .PullRequest }}{{ if .Url }}[#{{ .ID }}]({{ .Url }}){{ else }}—{{ end }}{{ else }}—{{ end }} |
+        {{- end }}
+        {{- end }}
+        {{- end }}
       title: Promote {{ with .ChangeTransferPolicy.Spec.ActivePath }}`{{ . }}` {{
         end }}({{ trunc 5 .ChangeTransferPolicy.Status.Proposed.Dry.Sha }}) to `{{
         .ChangeTransferPolicy.Spec.ActiveBranch }}`
