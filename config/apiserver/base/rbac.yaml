@@ -18,6 +18,7 @@ rules:
       - commitstatuses
       - argocdcommitstatuses
       - gitcommitstatuses
+      - jobcommitstatuses
       - timedcommitstatuses
       - webrequestcommitstatuses
       - scheduledcommitstatuses
